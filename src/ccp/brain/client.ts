@@ -1,0 +1,165 @@
+// src/ccp/brain/client.ts
+import { execFile } from 'node:child_process';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { promisify } from 'node:util';
+import YAML from 'yaml';
+import type { CaptureType } from '../artifacts/knowledge-capture-record';
+import { taskPendingCapturesPath } from '../task-paths';
+
+const execFileAsync = promisify(execFile);
+
+export interface BrainSpawnResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export type BrainSpawnFn = (cmd: string, args: string[]) => Promise<BrainSpawnResult>;
+
+const defaultSpawn: BrainSpawnFn = async (cmd, args) => {
+  const { stdout, stderr } = await execFileAsync(cmd, args);
+  return { stdout, stderr, exitCode: 0 };
+};
+
+export interface BrainNode {
+  id: string;
+  content: string;
+  tags: string[];
+  created_at: string;
+  confidence: number;
+}
+
+export interface BrainQueryResult {
+  query: string;
+  items: Array<{ id: string; content: string; [k: string]: unknown }>;
+  total_matches: number;
+  returned_count: number;
+}
+
+export interface WriteResult {
+  id: string | null; // null when deferred
+  deferred: boolean;
+  reason?: string;
+}
+
+export interface BrainClientOptions {
+  dbPath: string;
+  spawn?: BrainSpawnFn;
+  repoRoot?: string; // required for queueing on failure
+}
+
+const CONFIDENCE: Record<CaptureType, number> = {
+  decision: 0.95,
+  architecture: 0.95,
+  warning: 0.9,
+  command: 0.85,
+  convention: 0.85,
+  failure: 0.85,
+  pattern: 0.7,
+};
+
+export class BrainClient {
+  private readonly dbPath: string;
+  private readonly spawn: BrainSpawnFn;
+  private readonly repoRoot: string | undefined;
+
+  constructor(opts: BrainClientOptions) {
+    this.dbPath = opts.dbPath;
+    this.spawn = opts.spawn ?? defaultSpawn;
+    this.repoRoot = opts.repoRoot;
+  }
+
+  static confidenceFor(type: CaptureType): number {
+    return CONFIDENCE[type];
+  }
+
+  async write(args: {
+    content: string;
+    type: CaptureType;
+    scope: 'session' | 'project' | 'global';
+    taskId: string;
+    project: string;
+    sourceType?: 'human' | 'session' | 'ingestion';
+  }): Promise<WriteResult> {
+    const tags = [
+      `ccp:${args.taskId}`,
+      `type:${args.type}`,
+      `scope:${args.scope}`,
+      `project:${args.project}`,
+    ];
+    const cliArgs = [
+      '--db-path',
+      this.dbPath,
+      'write',
+      '--content',
+      args.content,
+      '--tags',
+      tags.join(','),
+      '--confidence',
+      String(BrainClient.confidenceFor(args.type)),
+      ...(args.sourceType ? ['--source-type', args.sourceType] : []),
+    ];
+    try {
+      const result = await this.spawn('brain', cliArgs);
+      const node = JSON.parse(result.stdout) as BrainNode;
+      return { id: node.id, deferred: false };
+    } catch (e) {
+      return this.queueDeferred(args, (e as Error).message);
+    }
+  }
+
+  async query(args: {
+    query: string;
+    tags?: string[];
+    max?: number;
+  }): Promise<BrainQueryResult> {
+    const cliArgs = [
+      '--db-path',
+      this.dbPath,
+      'query',
+      args.query,
+      ...(args.tags ? ['--tags', args.tags.join(',')] : []),
+      ...(args.max ? ['--max', String(args.max)] : []),
+    ];
+    try {
+      const result = await this.spawn('brain', cliArgs);
+      return JSON.parse(result.stdout) as BrainQueryResult;
+    } catch {
+      return { query: args.query, items: [], total_matches: 0, returned_count: 0 };
+    }
+  }
+
+  private queueDeferred(
+    args: {
+      content: string;
+      type: CaptureType;
+      scope: 'session' | 'project' | 'global';
+      taskId: string;
+      project: string;
+    },
+    reason: string,
+  ): WriteResult {
+    if (!this.repoRoot) {
+      return {
+        id: null,
+        deferred: false,
+        reason: `brain unavailable, no repoRoot for queue: ${reason}`,
+      };
+    }
+    const path = taskPendingCapturesPath(this.repoRoot, args.taskId);
+    mkdirSync(dirname(path), { recursive: true });
+    const entry = YAML.stringify([
+      {
+        content: args.content,
+        type: args.type,
+        scope: args.scope,
+        project: args.project,
+        queued_at: new Date().toISOString(),
+        reason,
+      },
+    ]);
+    appendFileSync(path, entry, 'utf-8');
+    return { id: null, deferred: true, reason };
+  }
+}
