@@ -10,12 +10,12 @@ import { runPlan } from '../ccp/commands/plan';
 import { runRemember } from '../ccp/commands/remember';
 import { runRun } from '../ccp/commands/run';
 import { getCurrentTaskId } from '../ccp/commands/shared/current-task';
-import { makeMockStepExecutor } from '../ccp/commands/shared/step-executor';
 import { runStatus } from '../ccp/commands/status';
 import { runVerify } from '../ccp/commands/verify';
 import type { SessionApprovalCache } from '../ccp/policy/decision-flow';
 import { ToolRegistry } from '../ccp/policy/tool-registry';
 import { replayFromEventLog } from '../ccp/recovery';
+import { type PiAgentLike, makePiAgentExecutor } from '../ccp/tools/pi-agent-executor';
 import { seedPiTools } from '../ccp/tools/pi-tool-defaults';
 import { type ProjectConfig, loadProjectConfig } from '../core/manifest';
 import { sessionSnapshotPath } from '../core/runtime-paths';
@@ -86,6 +86,31 @@ const entry: ExtensionEntry = async (api: ExtensionAPI) => {
   });
   const projectName = _state.config.project_id;
 
+  const piAgent: PiAgentLike = {
+    async runAgent(prompt) {
+      const apiAny = api as unknown as { runAgentTurn?: (p: string) => Promise<unknown> };
+      if (typeof apiAny.runAgentTurn === 'function') {
+        const result = (await apiAny.runAgentTurn(prompt)) as {
+          filesChanged?: string[];
+          commandsRun?: string[];
+          exitCode?: number;
+          errorSummary?: string;
+        };
+        return {
+          filesChanged: result.filesChanged ?? [],
+          commandsRun: result.commandsRun ?? [],
+          exitCode: result.exitCode ?? 0,
+          ...(result.errorSummary ? { errorSummary: result.errorSummary } : {}),
+        };
+      }
+      // Fallback when Pi's runAgentTurn isn't on the API surface (development, tests).
+      api.log(`[pi-agent stub — no runAgentTurn available]\n${prompt}`);
+      return { filesChanged: [], commandsRun: [], exitCode: 0 };
+    },
+  };
+
+  const executor = makePiAgentExecutor({ agent: piAgent });
+
   api.registerSlashCommand('doctor', async () => {
     const report = await runDoctorCommand({ repoRoot: _state!.repoRoot });
     api.log(renderDoctorReport(report));
@@ -119,12 +144,11 @@ const entry: ExtensionEntry = async (api: ExtensionAPI) => {
       api.log('no active task');
       return;
     }
-    // Plan 2c will replace makeMockStepExecutor with a Pi-agent-backed executor.
     const result = await runRun({
       repoRoot: _state!.repoRoot,
       sessionId,
       taskId,
-      executor: makeMockStepExecutor({}),
+      executor,
       resume,
     });
     if (result.outcome === 'verifying') {
