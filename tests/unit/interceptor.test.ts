@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { readEvents } from '../../src/core/event-log';
 import {
@@ -8,6 +9,7 @@ import {
   guardMemoryWrite,
   requestCriticalAction,
 } from '../../src/core/interceptor';
+import { initProjectionSchema } from '../../src/core/projection';
 
 describe('interceptor', () => {
   function setupRepo(): string {
@@ -48,6 +50,42 @@ workspace:
     const events = readEvents(join(dir, '.agent-os', 'runtime', 'events.jsonl'));
     expect(events).toHaveLength(1);
     expect(events[0]?.event_type).toBe('TOOL_REQUESTED');
+  });
+
+  it('requestCriticalAction mirrors a PENDING row into projection.db', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aos-int-'));
+    mkdirSync(join(dir, '.agent-os', 'runtime'), { recursive: true });
+    writeFileSync(
+      join(dir, '.agent-os', 'project.yaml'),
+      `project_id: demo
+domain_type: d
+runtime_version: 0.1.0
+memory_namespace: demo
+verification_profile: default
+critical_actions: []
+workspace:
+  root: .
+`,
+    );
+    // Pre-create projection.db so interceptor finds it
+    const dbPath = join(dir, '.agent-os', 'runtime', 'projection.db');
+    const db = new Database(dbPath);
+    initProjectionSchema(db);
+    db.close();
+
+    await requestCriticalAction({
+      repoRoot: dir,
+      sessionId: 'sess-1',
+      capability: 'memory_write_global',
+      resolvedArgs: { node: 'foo' },
+    });
+
+    const db2 = new Database(dbPath, { readonly: true });
+    const row = db2.prepare('SELECT * FROM approvals').get() as
+      | { final_status: string }
+      | undefined;
+    db2.close();
+    expect(row?.final_status).toBe('PENDING');
   });
 
   it('guardMemoryWrite blocks global write when global_memory_write disabled', () => {

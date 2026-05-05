@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { buildPermissionDeniedEvent, buildToolRequestedEvent } from './events';
 import { loadProjectConfig } from './manifest';
 import { buildMemoryRoute } from './memory-router';
+import { initProjectionSchema, mirrorApprovalEvent } from './projection';
 import { eventLogPath } from './runtime-paths';
 import { appendJsonlEventAtomic } from './session-store';
 
@@ -54,7 +56,15 @@ export async function requestCriticalAction(args: {
     timestamp: requestedAt.toISOString(),
   });
   appendJsonlEventAtomic(logPath, event);
-  // TODO(Plan 2): mirror to brain via brain CLI projection. v1 stub.
+  const projectionPath = join(args.repoRoot, '.agent-os', 'runtime', 'projection.db');
+  try {
+    const db = new Database(projectionPath);
+    initProjectionSchema(db);
+    mirrorApprovalEvent(db, event, { namespace: config.memory_namespace });
+    db.close();
+  } catch {
+    // projection mirror is best-effort; events.jsonl is the truth
+  }
   return actionHash;
 }
 
