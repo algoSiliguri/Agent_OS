@@ -1,11 +1,4 @@
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { BrainClient, type BrainSpawnFn } from '../../src/ccp/brain/client';
 import { runGrill } from '../../src/ccp/commands/grill';
+import { runInit } from '../../src/ccp/commands/init';
 import { runPlan } from '../../src/ccp/commands/plan';
 import { runRemember } from '../../src/ccp/commands/remember';
 import { runRun } from '../../src/ccp/commands/run';
@@ -21,48 +15,42 @@ import { runStatus } from '../../src/ccp/commands/status';
 import { runVerify } from '../../src/ccp/commands/verify';
 import { taskArtifactPath, taskStatePath } from '../../src/ccp/task-paths';
 import { readEvents } from '../../src/core/event-log';
-import { computeConstitutionHash, computeJsonFileHash } from '../../src/core/hash';
 import { eventLogPath } from '../../src/core/runtime-paths';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, '..', '..');
 
-function setupRepo(): { dir: string; sessionId: string } {
+async function setupRepo(): Promise<{ dir: string; sessionId: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'aos-s16-'));
-  mkdirSync(join(dir, '.agent-os', 'schemas'), { recursive: true });
-  mkdirSync(join(dir, '.agent-os', 'contracts'), { recursive: true });
-  mkdirSync(join(dir, '.agent-os', 'runtime'), { recursive: true });
-  const projectSchemas = join(__dirname, '..', '..', '.agent-os', 'schemas');
-  for (const f of [
-    'constitution-binding.schema.json',
-    'telemetry-event.schema.json',
-    'permission-manifest.schema.json',
-  ]) {
-    copyFileSync(join(projectSchemas, f), join(dir, '.agent-os', 'schemas', f));
+
+  const exec = (cmd: string): string => {
+    if (cmd.includes('brain --version')) return '0.0.0';
+    throw new Error(`unexpected: ${cmd}`);
+  };
+
+  const result = await runInit({
+    rest: 'section-16-demo --domain test --namespace section-16 --no-prompt',
+    targetRoot: dir,
+    ui: {
+      confirm: async () => true,
+      input: async () => '',
+      select: async (_: string, c: string[]) => c[0] ?? '',
+    },
+    log: () => {},
+    exec,
+    sourceRoot: REPO_ROOT,
+  });
+
+  if (!result.ok) {
+    throw new Error('runInit failed during test setup');
   }
-  writeFileSync(join(dir, '.agent-os', 'contracts', 'index.json'), '{}');
-  let body = readFileSync(join(__dirname, '..', 'fixtures', 'constitution-good.md'), 'utf-8');
-  const indexHash = computeJsonFileHash('{}');
-  body = body.replace('contract-index-hash: ""', `contract-index-hash: "${indexHash}"`);
-  const contentHash = computeConstitutionHash(body);
-  body = body.replace('content-hash: ""', `content-hash: "${contentHash}"`);
-  writeFileSync(join(dir, 'AGENT_OS_CONSTITUTION.md'), body);
-  writeFileSync(
-    join(dir, '.agent-os', 'project.yaml'),
-    `project_id: section-16-demo
-domain_type: test
-runtime_version: 0.1.0
-memory_namespace: section-16
-verification_profile: default
-critical_actions: []
-workspace:
-  root: ${dir}
-`,
-  );
+
   writeFileSync(
     join(dir, '.agent-os', 'runtime', 'session.json'),
     JSON.stringify({ session_id: 'sess-s16', current_task_id: null }),
     'utf-8',
   );
+
   return { dir, sessionId: 'sess-s16' };
 }
 
@@ -78,7 +66,7 @@ function scriptedUi(answers: string[], confirmAnswers: boolean[] = []) {
 
 describe('Section-16 demo — end-to-end', () => {
   it('grill → plan → run (with one recoverable failure) → resume → verify → remember → status', async () => {
-    const { dir, sessionId } = setupRepo();
+    const { dir, sessionId } = await setupRepo();
 
     // 1. /grill
     const grillUi = scriptedUi([
