@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.1.0 — 2026-05-DD
+## v1.1.0 — 2026-05-07
 
 ### Added
 - `/init <project-id>` slash command that scaffolds a greenfield project (governance files, runtime dirs, manifest). Replaces the per-repo `bootstrap-ccp.{sh,ps1}` scripts.

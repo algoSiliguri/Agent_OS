@@ -79,6 +79,10 @@ Tagging convention on writes: `ccp:<task_id>`, `type:<type>`, `scope:<scope>`,
 `project:<project_id>`. Confidence scale per `src/ccp/brain/client.ts`
 `CONFIDENCE` map.
 
+## Slash commands
+
+- **`/init <project-id>`** — scaffolds a project's `.agent-os/` directory with bundled governance files and a rendered `project.yaml`. Replaces the v1.0.0-era `bootstrap-ccp.{sh,ps1}` scripts. Flags: `--upgrade` (refresh governance, preserve project.yaml), `--force` (overwrite), `--no-prompt` (CI mode), `--domain`/`--profile`/`--namespace`/`--critical-actions` (scripted values).
+
 ## File layout
 
 ```
