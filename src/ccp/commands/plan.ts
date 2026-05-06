@@ -1,0 +1,136 @@
+import { randomUUID } from 'node:crypto';
+import { eventLogPath } from '../../core/runtime-paths';
+import { appendJsonlEventAtomic } from '../../core/session-store';
+import type { UiAdapter } from '../../pi/ui';
+import { makeEnvelope } from '../artifacts/envelope';
+import { readArtifact, writeArtifact } from '../artifacts/io';
+import {
+  buildPlanApprovedEvent,
+  buildPlanCreatedEvent,
+  buildPlanRejectedEvent,
+  buildTaskStateTransitionEvent,
+} from '../ccp-events';
+import { type PlanDrafter, defaultPlanDrafter } from './shared/plan-drafter';
+import { requireTaskState, writeTaskState } from './shared/task-loader';
+
+export type PlanOutcome = 'approved' | 'rejected';
+
+export interface RunPlanArgs {
+  repoRoot: string;
+  sessionId: string;
+  taskId: string;
+  ui: UiAdapter;
+  drafter?: PlanDrafter;
+}
+
+export async function runPlan(args: RunPlanArgs): Promise<{ outcome: PlanOutcome }> {
+  requireTaskState(args.repoRoot, args.taskId, ['SHARED_UNDERSTANDING']);
+  const log = eventLogPath(args.repoRoot);
+
+  appendJsonlEventAtomic(
+    log,
+    buildTaskStateTransitionEvent({
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      from: 'SHARED_UNDERSTANDING',
+      to: 'PLANNING',
+      triggeredBy: '/plan',
+    }),
+  );
+  writeTaskState(args.repoRoot, args.taskId, 'PLANNING');
+
+  const grill = readArtifact(args.repoRoot, args.taskId, 'grill') as unknown as {
+    goal: string;
+    assumptions: Array<{ id: string; text: string }>;
+    risks: Array<{ id: string; risk: string }>;
+    constraints: Array<{ id: string; text: string }>;
+    success_criteria: Array<{ id: string; text: string }>;
+  };
+
+  const drafter = args.drafter ?? defaultPlanDrafter();
+  const draft = await drafter.draft({
+    goal: grill.goal,
+    assumptions: grill.assumptions,
+    risks: grill.risks,
+    constraints: grill.constraints,
+    successCriteria: grill.success_criteria,
+    workspaceRoot: args.repoRoot,
+  });
+
+  const env = makeEnvelope({ taskId: args.taskId, artifactType: 'PlanArtifact' });
+  const planId = randomUUID();
+  const planArtifact = {
+    ...env,
+    artifact_type: 'PlanArtifact' as const,
+    artifact_id: planId,
+    source_grill_record: 'most-recent-grill-on-task',
+    scope: draft.scope,
+    steps: draft.steps,
+    approval_required: draft.approval_required,
+    rollback: draft.rollback,
+  };
+  writeArtifact(args.repoRoot, args.taskId, 'plan', planArtifact);
+
+  appendJsonlEventAtomic(
+    log,
+    buildPlanCreatedEvent({
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      planId,
+      stepCount: draft.steps.length,
+    }),
+  );
+
+  appendJsonlEventAtomic(
+    log,
+    buildTaskStateTransitionEvent({
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      from: 'PLANNING',
+      to: 'AWAITING_PLAN_APPROVAL',
+      triggeredBy: '/plan (drafted)',
+    }),
+  );
+  writeTaskState(args.repoRoot, args.taskId, 'AWAITING_PLAN_APPROVAL');
+
+  const summary = renderPlanSummary(draft);
+  const approved = await args.ui.confirm(`${summary}\n\nApprove this plan?`);
+  if (!approved) {
+    appendJsonlEventAtomic(
+      log,
+      buildPlanRejectedEvent({
+        sessionId: args.sessionId,
+        taskId: args.taskId,
+        planId,
+        reason: 'user rejected',
+      }),
+    );
+    appendJsonlEventAtomic(
+      log,
+      buildTaskStateTransitionEvent({
+        sessionId: args.sessionId,
+        taskId: args.taskId,
+        from: 'AWAITING_PLAN_APPROVAL',
+        to: 'SHARED_UNDERSTANDING',
+        triggeredBy: '/plan (rejected)',
+      }),
+    );
+    writeTaskState(args.repoRoot, args.taskId, 'SHARED_UNDERSTANDING');
+    return { outcome: 'rejected' };
+  }
+
+  appendJsonlEventAtomic(
+    log,
+    buildPlanApprovedEvent({
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      planId,
+    }),
+  );
+  return { outcome: 'approved' };
+}
+
+function renderPlanSummary(draft: { steps: Array<{ title: string; risk_tier: string }> }): string {
+  const lines = draft.steps.map((s, i) => `  ${i + 1}. ${s.title} (risk: ${s.risk_tier})`);
+  return `PLAN — ${draft.steps.length} steps:\n${lines.join('\n')}`;
+}

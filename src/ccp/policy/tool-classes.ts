@@ -1,0 +1,17 @@
+export const ToolClass = {
+  READ_LOCAL: 'READ_LOCAL',
+  WRITE_LOCAL: 'WRITE_LOCAL',
+  EXECUTE_LOCAL: 'EXECUTE_LOCAL',
+  READ_NETWORK: 'READ_NETWORK',
+  WRITE_NETWORK: 'WRITE_NETWORK',
+  MCP_READ: 'MCP_READ',
+  MCP_WRITE: 'MCP_WRITE',
+  BROWSER_READ: 'BROWSER_READ',
+  BROWSER_WRITE: 'BROWSER_WRITE',
+  MEMORY_READ: 'MEMORY_READ',
+  MEMORY_WRITE: 'MEMORY_WRITE',
+  GOVERNANCE_MUTATION: 'GOVERNANCE_MUTATION',
+} as const;
+export type ToolClass = (typeof ToolClass)[keyof typeof ToolClass];
+
+export const ALL_TOOL_CLASSES: ReadonlyArray<ToolClass> = Object.values(ToolClass);
