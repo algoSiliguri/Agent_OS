@@ -11,6 +11,7 @@ import type { SessionStatus } from '../ccp/artifacts/session-status';
 import { BrainClient } from '../ccp/brain/client';
 import { renderDoctorReport, runDoctorCommand } from '../ccp/commands/doctor';
 import { runGrill } from '../ccp/commands/grill';
+import { runInit } from '../ccp/commands/init';
 import { runPlan } from '../ccp/commands/plan';
 import { runRemember } from '../ccp/commands/remember';
 import { runRun } from '../ccp/commands/run';
@@ -44,11 +45,23 @@ export function getExtensionState(): ExtensionState {
 
 const entry: ExtensionEntry = async (api: ExtensionAPI) => {
   const repoRoot = api.repoRoot();
+
+  api.registerSlashCommand('init', async (rest: string) => {
+    await runInit({
+      rest,
+      targetRoot: repoRoot,
+      ui: wrapUi(api.ui),
+      log: (m) => api.log(m),
+    });
+  });
+
   let config: ProjectConfig;
   try {
     config = loadProjectConfig(join(repoRoot, '.agent-os', 'project.yaml'));
   } catch (e) {
-    api.log(`agent-os: project.yaml missing or invalid (${(e as Error).message}). Extension idle.`);
+    api.log(
+      `agent-os: project.yaml missing or invalid (${(e as Error).message}). Run /init <project-id> to scaffold this project. Other commands disabled until then.`,
+    );
     return;
   }
 

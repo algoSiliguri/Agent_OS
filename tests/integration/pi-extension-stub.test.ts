@@ -82,7 +82,7 @@ workspace:
 }
 
 describe('Pi extension stub integration', () => {
-  it('registers seven slash commands and a tool_call handler on load', async () => {
+  it('registers eight slash commands and a tool_call handler on load', async () => {
     const dir = setupRepo();
     const fake = makeFakeApi(dir);
     await piExtension(fake.api as unknown as ExtensionAPI);
@@ -90,6 +90,7 @@ describe('Pi extension stub integration', () => {
     expect(snap.slashCommands).toEqual([
       'doctor',
       'grill',
+      'init',
       'plan',
       'remember',
       'run',
@@ -123,8 +124,20 @@ describe('Pi extension stub integration', () => {
     const fake = makeFakeApi(dir);
     await piExtension(fake.api as unknown as ExtensionAPI);
     const snap = fake.snapshot();
-    expect(snap.slashCommands).toEqual([]);
+    // /init is always registered; other commands require a configured project
+    expect(snap.slashCommands).toEqual(['init']);
     expect(snap.hasToolCallHandler).toBe(false);
-    expect(snap.logs.some((l) => l.includes('Extension idle'))).toBe(true);
+    expect(snap.logs.some((l) => l.includes('Run /init'))).toBe(true);
+  });
+
+  it('registers /init even when project.yaml is missing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aos-pi-int-noinit-'));
+    const fake = makeFakeApi(dir);
+    await piExtension(fake.api as unknown as ExtensionAPI);
+    const snap = fake.snapshot();
+    // /init must be available so the user can bootstrap a fresh repo
+    expect(snap.slashCommands).toContain('init');
+    // other project-dependent commands must NOT be registered in idle path
+    expect(snap.slashCommands).not.toContain('grill');
   });
 });

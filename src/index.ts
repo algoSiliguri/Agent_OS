@@ -104,3 +104,4 @@ export {
 } from './pi/tool-call-handler';
 export { wrapUi, type UiAdapter, type PiUiLike } from './pi/ui';
 export { mirrorTaskEvent } from './core/projection';
+export { runInit } from './ccp/commands/init';
