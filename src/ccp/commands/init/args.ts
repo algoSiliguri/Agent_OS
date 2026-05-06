@@ -21,7 +21,7 @@ export function parseInitArgs(rest: string): InitArgs {
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
-    if (tok && tok.startsWith('--')) {
+    if (tok?.startsWith('--')) {
       const name = tok.slice(2);
       if (BOOL_FLAGS.has(name)) {
         (flags as Record<string, boolean>)[name] = true;
