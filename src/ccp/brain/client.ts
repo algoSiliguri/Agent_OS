@@ -100,7 +100,6 @@ export class BrainClient {
     const cliArgs = [
       ...this.dbPathArgs(),
       'write',
-      '--content',
       args.content,
       '--tags',
       tags.join(','),

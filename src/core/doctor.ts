@@ -78,14 +78,16 @@ export function runDoctor(repoRoot: string): DoctorReport {
     return { status: 'hard_fail', checks };
   }
 
-  const brainDbPath = process.env.BRAIN_DB_PATH;
+  const resolvedDbPath =
+    process.env.BRAIN_DB_PATH ?? join(repoRoot, 'data_store', 'knowledge.db');
+  const dbReachable = existsSync(resolvedDbPath);
   checks.push({
     id: 'brain_db_path',
-    description: 'BRAIN_DB_PATH env var is set',
-    status: brainDbPath ? 'pass' : 'soft_fail',
-    detail: brainDbPath
+    description: 'Brain DB is reachable',
+    status: dbReachable ? 'pass' : 'soft_fail',
+    detail: dbReachable
       ? undefined
-      : 'BRAIN_DB_PATH is unset — /remember is disabled. Set it to enable knowledge capture.',
+      : `Brain DB not found at ${resolvedDbPath}. Run: brain --db-path "${resolvedDbPath}" init`,
   });
 
   const hasSoft = checks.some((c) => c.status === 'soft_fail');
