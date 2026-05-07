@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { readEvents } from '../../core/event-log';
 import { eventLogPath } from '../../core/runtime-paths';
 import { appendJsonlEventAtomic } from '../../core/session-store';
@@ -26,6 +27,7 @@ export interface RememberArgs {
   brain: BrainClient;
   ui: UiAdapter;
   projectName: string;
+  log?: (msg: string) => void;
   proposer?: CaptureProposer;
 }
 
@@ -152,6 +154,17 @@ export async function runRemember(args: RememberArgs): Promise<{ kept: number; d
     log,
     buildTaskCompletedEvent({ sessionId: args.sessionId, taskId: args.taskId }),
   );
+
+  if (kept > 0) {
+    const jsonlPath = join(args.repoRoot, 'data_store', 'knowledge.jsonl');
+    try {
+      await args.brain.export(jsonlPath);
+    } catch (e) {
+      args.log?.(
+        `agent-os: auto-export to ${jsonlPath} failed: ${(e as Error).message}. Run scripts/sync.sh export before committing.`,
+      );
+    }
+  }
 
   return { kept, dropped };
 }

@@ -105,9 +105,11 @@ export async function runInit({
 
   log('');
   log('Done. Next:');
-  log('  1. export BRAIN_DB_PATH="$HOME/.knowledge-brain/knowledge.db"');
-  log('  2. /doctor   (expect status: ok)');
-  log('  3. /grill <your idea>   to walk the loop');
+  log('  1. /doctor   (expect status: ok)');
+  log('  2. /grill <your idea>   to walk the loop');
+  log('');
+  log('  Brain DB defaults to ./data_store/knowledge.db (project-local).');
+  log('  To share memory across projects: export BRAIN_DB_PATH="$HOME/.knowledge-brain/knowledge.db"');
   log(`     ${GOVERNANCE_FILES.length} governance files copied; runtime dirs ready.`);
 
   return { ok: true };

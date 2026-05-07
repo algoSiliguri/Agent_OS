@@ -98,15 +98,11 @@ const entry: ExtensionEntry = async (api: ExtensionAPI) => {
 
   const sessionId = readSessionId(_state.repoRoot);
   const ui = wrapUi(api.ui);
+  const dbPath = process.env.BRAIN_DB_PATH ?? join(repoRoot, 'data_store', 'knowledge.db');
   if (!process.env.BRAIN_DB_PATH) {
-    api.log(
-      'agent-os: BRAIN_DB_PATH is not set — /remember is disabled. Set BRAIN_DB_PATH to enable knowledge capture.',
-    );
+    api.log(`agent-os: BRAIN_DB_PATH not set — using project-local default: ${dbPath}`);
   }
-  const brain = new BrainClient({
-    dbPath: process.env.BRAIN_DB_PATH,
-    repoRoot: _state.repoRoot,
-  });
+  const brain = new BrainClient({ dbPath, repoRoot: _state.repoRoot });
   brain.probe().catch((e: Error) => {
     api.log(`agent-os: brain CLI not reachable — /remember will fail (${e.message})`);
   });
@@ -221,7 +217,7 @@ const entry: ExtensionEntry = async (api: ExtensionAPI) => {
       api.log('no active task');
       return;
     }
-    await runRemember({ repoRoot: _state!.repoRoot, sessionId, taskId, brain, ui, projectName });
+    await runRemember({ repoRoot: _state!.repoRoot, sessionId, taskId, brain, ui, projectName, log: (m) => api.log(m) });
   });
 
   api.registerSlashCommand('status', async (rest: string) => {

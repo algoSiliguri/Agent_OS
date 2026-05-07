@@ -144,6 +144,19 @@ export class BrainClient {
     }
   }
 
+  async export(outputPath: string): Promise<void> {
+    const cliArgs = [...this.dbPathArgs(), 'export', outputPath];
+    try {
+      await this.spawn('brain', cliArgs);
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if (err.code === 'ENOENT') {
+        throw new BindingError('brain_cli_missing', `brain CLI not found on PATH: ${err.message}`);
+      }
+      throw new Error(`brain export failed: ${(err as Error).message ?? String(e)}`);
+    }
+  }
+
   async query(args: {
     query: string;
     tags?: string[];
