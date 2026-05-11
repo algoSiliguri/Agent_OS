@@ -10,7 +10,7 @@ v1 is **release-candidate quality** with four deferred items documented below.
 
 All critical-path behaviors are implemented, tested, and TypeScript-clean. The main trust gaps from prior passes (ephemeral policy decisions, advisory-only scope checking, untested /flow, orphan memory candidates, missing install validation) are now closed.
 
-Baseline: **385 tests, 0 failures, 0 TypeScript errors.**
+Baseline: **395 tests, 0 failures, 0 TypeScript errors.** (80 test files, incl. lifecycle integration)
 
 ---
 
@@ -175,7 +175,8 @@ Baseline: **385 tests, 0 failures, 0 TypeScript errors.**
 
 ```
 TypeScript: npx tsc --noEmit → 0 errors
-Agent_OS:   npm test → 385 passed, 0 failures (79 test files)
+Agent_OS:   npm test → 395 passed, 0 failures (80 test files)
+  incl. tests/integration/lifecycle.test.ts (10 tests — real shell, real scope, real verify, real brain)
 knowledge-brain: uv sync --extra dev && uv run pytest tests/ -v → 91 passed, 0 skipped
 ```
 
