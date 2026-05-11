@@ -1,7 +1,7 @@
 import { emitAndProject } from '../../core/projector';
 import type { UiAdapter } from '../../pi/ui';
 import { makeEnvelope } from '../artifacts/envelope';
-import { readArtifactRaw as readArtifact, writeArtifactRaw as writeArtifact } from '../artifacts/io';
+import { readArtifactRaw as readArtifact, writeArtifact } from '../artifacts/io';
 import {
   buildEvaluateCompletedEvent,
   buildEvaluateStartedEvent,

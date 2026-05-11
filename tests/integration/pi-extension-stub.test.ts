@@ -70,7 +70,7 @@ workspace:
 }
 
 describe('Pi extension stub integration', () => {
-  it('registers thirteen slash commands and a tool_call handler on load', async () => {
+  it('registers fourteen slash commands and a tool_call handler on load', async () => {
     const dir = setupRepo();
     const fake = makeFakeApi(dir);
     await piExtension(fake.api as unknown as ExtensionAPI);
@@ -80,6 +80,7 @@ describe('Pi extension stub integration', () => {
       'doctor',
       'evaluate',
       'flight',
+      'flow',
       'grill',
       'init',
       'plan',

@@ -25,12 +25,21 @@ const StepFailure = Type.Union([
   }),
 ]);
 
+const CommandOutput = Type.Object({
+  command: Type.String(),
+  exit_code: Type.Number(),
+  stdout: Type.String(),
+  stderr: Type.String(),
+  duration_ms: Type.Number(),
+});
+
 const ExecutedStep = Type.Object({
   step_id: Type.String(),
   status: StepStatus,
   events: Type.Array(Type.String()),
   files_changed: Type.Array(Type.String()),
   commands_run: Type.Array(Type.String()),
+  command_outputs: Type.Optional(Type.Array(CommandOutput)),
   approvals: Type.Array(Approval),
   failure: StepFailure,
 });

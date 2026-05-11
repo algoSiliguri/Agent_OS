@@ -6,7 +6,11 @@
 // at runtime — the shape is verified against the live installed Pi.
 
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync, readFileSync } from 'node:fs';
+
+const execFileAsync = promisify(execFile);
 import { basename, join } from 'node:path';
 import YAML from 'yaml';
 import { runDiagnose } from '../ccp/commands/diagnose';
@@ -40,7 +44,9 @@ import { runValidatorsForPhase } from '../core/validator-runner';
 import { type ArtifactType, taskArtifactPath, taskDir } from '../ccp/task-paths';
 import { defaultQuestionGenerator } from '../ccp/commands/shared/question-generator';
 import { defaultPlanDrafter } from '../ccp/commands/shared/plan-drafter';
-import { makeMockStepExecutor } from '../ccp/commands/shared/step-executor';
+import { makeShellStepExecutor } from '../ccp/commands/shared/step-executor';
+import { listPendingCandidates } from '../ccp/commands/shared/memory-staging';
+import { createCheckpoint, restoreCheckpoint } from '../ccp/commands/shared/git-checkpoint';
 import {
   type SessionApprovalCache,
   decideToolCall,
@@ -144,6 +150,15 @@ export default async function extension(pi: any): Promise<void> {
   // Loaded once per session; null = no pack installed (backward compat).
   let _phaseRegistry: PhaseRegistry | null = null;
   let _packLoadedForCwd: string | null = null;
+
+  // Updates the Pi status bar with the current task state. No-op if no active task.
+  function refreshStatusBar(cwd: string, taskId: string | null, ctx: any): void {
+    if (!taskId || !ctx.hasUI) return;
+    try {
+      const state = loadTaskState(cwd, taskId) ?? 'UNKNOWN';
+      ctx.ui.setStatus('agent-os', `${taskId} | ${state}`);
+    } catch { /* best-effort */ }
+  }
 
   // Called at the top of every command handler. No-op after first successful load.
   // Never throws — pack loading is best-effort; existing commands must not break.
@@ -339,10 +354,17 @@ export default async function extension(pi: any): Promise<void> {
         render: true,
       });
       if (status) {
+        const taskId = status.task_id;
+        let memLine = '';
+        try {
+          const pending = listPendingCandidates(ctx.cwd, taskId);
+          if (pending.length > 0) memLine = `\n${pending.length} memory candidate(s) pending — run /remember`;
+        } catch { /* best-effort */ }
         ctx.ui.notify(
-          `${status.task_id} · ${status.current_state}\nnext: ${status.next_action}`,
+          `${taskId} · ${status.current_state}\nnext: ${status.next_action}${memLine}`,
           'info',
         );
+        refreshStatusBar(ctx.cwd, taskId, ctx);
       } else {
         ctx.ui.notify('No active task. Run /init if this project is not yet initialized.', 'info');
       }
@@ -388,7 +410,7 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
           generator: defaultQuestionGenerator(),
         });
-        ctx.ui.setStatus('agent-os', undefined);
+        refreshStatusBar(ctx.cwd, taskId, ctx);
         ctx.ui.notify(`Task ${taskId} created. Run /plan to draft the plan.`, 'info');
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
@@ -417,7 +439,7 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
           drafter: defaultPlanDrafter(),
         });
-        ctx.ui.setStatus('agent-os', undefined);
+        refreshStatusBar(ctx.cwd, taskId, ctx);
         ctx.ui.notify(
           outcome === 'approved'
             ? 'Plan approved. Run /run to execute.'
@@ -443,13 +465,28 @@ export default async function extension(pi: any): Promise<void> {
       }
       ctx.ui.setStatus('agent-os', 'running…');
       try {
+        // Git checkpoint before run — preserves dirty tree if steps fail.
+        const ckpt = await createCheckpoint(ctx.cwd, `agent-os-checkpoint: ${taskId}`);
+        if (ckpt.noGit) {
+          ctx.ui.notify('Warning: not a git repo — no checkpoint created. Proceeding.', 'info');
+        } else if (ckpt.created) {
+          ctx.ui.notify(`Checkpoint: stashed ${ckpt.dirtyFiles.length} file(s). Will restore on failure.`, 'info');
+        }
+
         const { outcome } = await runRun({
           repoRoot: ctx.cwd,
           sessionId: loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID(),
           taskId,
-          executor: makeMockStepExecutor({}),
+          executor: makeShellStepExecutor({ cwd: ctx.cwd }),
         });
-        ctx.ui.setStatus('agent-os', undefined);
+        refreshStatusBar(ctx.cwd, taskId, ctx);
+        if (outcome !== 'verifying' && ckpt.created) {
+          // Restore stash on failure so changes aren't lost
+          const restore = await restoreCheckpoint(ctx.cwd);
+          if (restore.restored) {
+            ctx.ui.notify('Checkpoint restored — pre-run changes are back.', 'info');
+          }
+        }
         ctx.ui.notify(
           outcome === 'verifying'
             ? 'Execution recorded. Run /verify to check results.'
@@ -458,6 +495,10 @@ export default async function extension(pi: any): Promise<void> {
         );
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
+        // Attempt restore on exception
+        if (typeof taskId === 'string') {
+          try { await restoreCheckpoint(ctx.cwd); } catch { /* best-effort */ }
+        }
         ctx.ui.notify(`/run failed: ${(e as Error).message}`, 'error');
       }
     },
@@ -481,8 +522,20 @@ export default async function extension(pi: any): Promise<void> {
           sessionId: verifySessionId,
           taskId,
           runner: {
-            async runCommand(_cmd: string) {
-              return { exitCode: 0, stdout: 'stub pass', stderr: '' };
+            async runCommand(cmd: string) {
+              try {
+                const { stdout, stderr } = await execFileAsync('sh', ['-c', cmd], {
+                  cwd: ctx.cwd,
+                  timeout: 60_000,
+                });
+                return { exitCode: 0, stdout, stderr };
+              } catch (err: any) {
+                return {
+                  exitCode: err.code ?? 1,
+                  stdout: err.stdout ?? '',
+                  stderr: err.stderr ?? String(err.message),
+                };
+              }
             },
           },
         });
@@ -667,15 +720,202 @@ export default async function extension(pi: any): Promise<void> {
     },
   });
 
+  // ── /flow ─────────────────────────────────────────────────────────────────
+  pi.registerCommand('flow', {
+    description: 'Run full governed task lifecycle. Usage: /flow <goal>',
+    handler: async (args: string, ctx: any) => {
+      const goal = args.trim();
+      if (!goal) {
+        ctx.ui.notify('/flow requires a goal. Example: /flow add pagination to users list', 'error');
+        return;
+      }
+      const ui = makePiUiAdapter(ctx.ui);
+      const config = loadPolicyConfig(ctx.cwd);
+
+      // ── grill ──
+      ctx.ui.setStatus('agent-os', 'flow: grilling…');
+      let taskId: string;
+      try {
+        ({ taskId } = await runGrill({
+          repoRoot: ctx.cwd,
+          sessionId: randomUUID(),
+          goal,
+          userType: 'non_developer',
+          ui,
+          generator: defaultQuestionGenerator(),
+        }));
+      } catch (e) {
+        ctx.ui.setStatus('agent-os', undefined);
+        ctx.ui.notify(`/flow stopped at grill: ${(e as Error).message}`, 'error');
+        return;
+      }
+      refreshStatusBar(ctx.cwd, taskId, ctx);
+      const proceedWithPlan = await ui.confirm(`${taskId}: grill done. Proceed with /plan?`);
+      if (!proceedWithPlan) { ctx.ui.notify('/flow paused after grill. Run /plan when ready.', 'info'); return; }
+
+      // ── plan ──
+      ctx.ui.setStatus('agent-os', 'flow: planning…');
+      const planSessionId = loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID();
+      let planOutcome: string;
+      try {
+        ({ outcome: planOutcome } = await runPlan({
+          repoRoot: ctx.cwd,
+          sessionId: planSessionId,
+          taskId,
+          ui,
+          drafter: defaultPlanDrafter(),
+        }));
+      } catch (e) {
+        ctx.ui.setStatus('agent-os', undefined);
+        ctx.ui.notify(`/flow stopped at plan: ${(e as Error).message}`, 'error');
+        return;
+      }
+      refreshStatusBar(ctx.cwd, taskId, ctx);
+      if (planOutcome !== 'approved') { ctx.ui.notify('/flow paused — plan not approved. Refine and run /plan, then /flow resume.', 'info'); return; }
+      const proceedWithRun = await ui.confirm(`${taskId}: plan approved. Proceed with /run?`);
+      if (!proceedWithRun) { ctx.ui.notify('/flow paused after plan. Run /run when ready.', 'info'); return; }
+
+      // ── run ──
+      ctx.ui.setStatus('agent-os', 'flow: running…');
+      const flowCkpt = await createCheckpoint(ctx.cwd, `agent-os-checkpoint: ${taskId}`);
+      if (!flowCkpt.noGit && flowCkpt.created) {
+        ctx.ui.notify(`Checkpoint: stashed ${flowCkpt.dirtyFiles.length} file(s) before run.`, 'info');
+      }
+      let runOutcome: string;
+      try {
+        ({ outcome: runOutcome } = await runRun({
+          repoRoot: ctx.cwd,
+          sessionId: loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID(),
+          taskId,
+          executor: makeShellStepExecutor({ cwd: ctx.cwd }),
+        }));
+      } catch (e) {
+        ctx.ui.setStatus('agent-os', undefined);
+        if (flowCkpt.created) { try { await restoreCheckpoint(ctx.cwd); } catch { /* best-effort */ } }
+        ctx.ui.notify(`/flow stopped at run: ${(e as Error).message}`, 'error');
+        return;
+      }
+      refreshStatusBar(ctx.cwd, taskId, ctx);
+      if (runOutcome !== 'verifying') {
+        if (flowCkpt.created) {
+          const r = await restoreCheckpoint(ctx.cwd);
+          if (r.restored) ctx.ui.notify('Checkpoint restored — pre-run changes are back.', 'info');
+        }
+        ctx.ui.notify(`/flow stopped — /run outcome: ${runOutcome}. Fix and /run --resume.`, 'error');
+        return;
+      }
+
+      // ── verify ──
+      ctx.ui.setStatus('agent-os', 'flow: verifying…');
+      let verifyResult: string;
+      const verifySessionId = loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID();
+      try {
+        ({ result: verifyResult } = await runVerify({
+          repoRoot: ctx.cwd,
+          sessionId: verifySessionId,
+          taskId,
+          runner: {
+            async runCommand(cmd: string) {
+              try {
+                const { stdout, stderr } = await execFileAsync('sh', ['-c', cmd], { cwd: ctx.cwd, timeout: 60_000 });
+                return { exitCode: 0, stdout, stderr };
+              } catch (err: any) {
+                return { exitCode: err.code ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? String(err.message) };
+              }
+            },
+          },
+        }));
+      } catch (e) {
+        ctx.ui.setStatus('agent-os', undefined);
+        ctx.ui.notify(`/flow stopped at verify: ${(e as Error).message}`, 'error');
+        return;
+      }
+      refreshStatusBar(ctx.cwd, taskId, ctx);
+      if (verifyResult !== 'pass') { ctx.ui.notify(`/flow stopped — verification: ${verifyResult}. Fix and run /verify.`, 'error'); return; }
+
+      // ── review ──
+      ctx.ui.setStatus('agent-os', 'flow: reviewing…');
+      let reviewStatus: string;
+      try {
+        ({ status: reviewStatus } = await runReview({
+          repoRoot: ctx.cwd,
+          sessionId: verifySessionId,
+          taskId,
+          ui,
+        }));
+      } catch (e) {
+        ctx.ui.setStatus('agent-os', undefined);
+        ctx.ui.notify(`/flow stopped at review: ${(e as Error).message}`, 'error');
+        return;
+      }
+      refreshStatusBar(ctx.cwd, taskId, ctx);
+      if (reviewStatus === 'FAIL' || reviewStatus === 'BLOCKED') { ctx.ui.notify(`/flow stopped — review: ${reviewStatus}. Fix and run /verify again.`, 'error'); return; }
+
+      // ── evaluate ──
+      ctx.ui.setStatus('agent-os', 'flow: evaluating…');
+      let taskOutcome: string;
+      try {
+        ({ taskOutcome } = await runEvaluate({
+          repoRoot: ctx.cwd,
+          sessionId: verifySessionId,
+          taskId,
+          ui,
+        }));
+      } catch (e) {
+        ctx.ui.setStatus('agent-os', undefined);
+        ctx.ui.notify(`/flow stopped at evaluate: ${(e as Error).message}`, 'error');
+        return;
+      }
+      refreshStatusBar(ctx.cwd, taskId, ctx);
+
+      // Memory is always human-gated — never auto-run /remember
+      ctx.ui.notify(
+        taskOutcome !== 'FAIL'
+          ? `Flow complete. ${taskId} evaluated: ${taskOutcome}. Run /remember to save learnings.`
+          : `Flow complete with FAIL evaluation. Review and decide whether to retry.`,
+        taskOutcome === 'FAIL' ? 'error' : 'info',
+      );
+    },
+  });
+
   // ── tool_call policy (Phase 4) ───────────────────────────────────────────
   // Tier 1 → pass. Tier 2 → confirm once per session. Tier 3 → confirm every
   // call. Tier 4 / unknown → block (or ask if break_glass.enabled).
+  //
+  // Phase escalation: outside EXECUTING state, write/edit tools escalate from
+  // tier-2 (approve-once) to tier-3 (approve-every-call). This prevents silent
+  // file mutations during grilling, planning, verification, and review phases.
+  const WRITE_TOOL_IDS = new Set(['edit', 'write', 'bash']);
+  const EXECUTING_STATES = new Set(['EXECUTING']);
+
   pi.on('tool_call', async (event: any, ctx: any) => {
     const { toolName, input } = event as { toolName: string; input: Record<string, unknown> };
     const config = loadPolicyConfig(ctx.cwd);
+
+    // Phase-aware tier escalation for mutating tools
+    let escalatedConfig = config;
+    if (WRITE_TOOL_IDS.has(toolName)) {
+      try {
+        const taskId = getCurrentTaskId(ctx.cwd);
+        if (taskId) {
+          const state = loadTaskState(ctx.cwd, taskId);
+          if (state && !EXECUTING_STATES.has(state)) {
+            // Escalate writes to tier-3 outside EXECUTING
+            escalatedConfig = {
+              ...config,
+              overrides: [
+                ...(config.overrides ?? []),
+                { tool: toolName, when: 'matches ".*"', tier: 3 as const },
+              ],
+            };
+          }
+        }
+      } catch { /* best-effort: fall back to base tier */ }
+    }
+
     const decision = decideToolCall(
       { toolName, input: input ?? {} },
-      { registry, cache: sessionCache, config },
+      { registry, cache: sessionCache, config: escalatedConfig },
     );
 
     if (decision.outcome === 'pass') return undefined;
@@ -694,7 +934,10 @@ export default async function extension(pi: any): Promise<void> {
     }
 
     // outcome === 'ask'
-    const approved = await ctx.ui.confirm('Agent OS', `${toolName}: ${decision.reason}`);
+    const taskId = getCurrentTaskId(ctx.cwd);
+    const state = taskId ? loadTaskState(ctx.cwd, taskId) : null;
+    const phaseHint = state ? ` [phase: ${state}]` : '';
+    const approved = await ctx.ui.confirm('Agent OS', `${toolName}: ${decision.reason}${phaseHint}`);
     if (decision.cacheKey) recordTier2Approval(sessionCache, decision.cacheKey, approved);
     return approved ? undefined : { block: true, reason: `user denied: ${toolName}` };
   });
