@@ -33,6 +33,15 @@ const CommandOutput = Type.Object({
   duration_ms: Type.Number(),
 });
 
+const ScopeResult = Type.Union([
+  Type.Literal('exact_match'),
+  Type.Literal('subset_match'),
+  Type.Literal('extra_files_detected'),
+  Type.Literal('missing_expected_changes'),
+  Type.Literal('no_changes'),
+  Type.Literal('non_git_unverifiable'),
+]);
+
 const ExecutedStep = Type.Object({
   step_id: Type.String(),
   status: StepStatus,
@@ -42,6 +51,11 @@ const ExecutedStep = Type.Object({
   command_outputs: Type.Optional(Type.Array(CommandOutput)),
   approvals: Type.Array(Approval),
   failure: StepFailure,
+  scope_result: Type.Optional(ScopeResult),
+  files_declared: Type.Optional(Type.Array(Type.String())),
+  files_observed: Type.Optional(Type.Array(Type.String())),
+  incidental_files: Type.Optional(Type.Array(Type.String())),
+  scope_violation_reason: Type.Optional(Type.String()),
 });
 
 export const ExecutionRecord = Type.Intersect([
