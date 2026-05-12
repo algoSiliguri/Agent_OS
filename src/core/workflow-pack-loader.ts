@@ -19,6 +19,15 @@ export interface ValidatorDefinition {
   mode: 'advisory' | 'blocking';
 }
 
+export interface GrillConfig {
+  question_profile: 'default' | 'doc_grounded';
+  max_questions?: number;
+}
+
+export interface PlanConfig {
+  verification_profile: 'detected' | 'none';
+}
+
 export interface WorkflowPackManifest {
   workflow_pack_id: string;
   version: string;
@@ -30,6 +39,8 @@ export interface WorkflowPackManifest {
   artifact_format: 'yaml' | 'json';
   phases: PhaseDefinition[];
   validators: ValidatorDefinition[];
+  grill?: GrillConfig;
+  plan?: PlanConfig;
 }
 
 export type WorkflowPackLoadResult =
@@ -95,7 +106,51 @@ function validateManifest(raw: unknown, packDir: string): WorkflowPackManifest {
           mode: v.mode === 'blocking' ? 'blocking' : 'advisory',
         }))
       : [],
+    grill: parseGrillConfig(r.grill, packDir),
+    plan: parsePlanConfig(r.plan, packDir),
   };
+}
+
+function parseGrillConfig(raw: unknown, packDir: string): GrillConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object') {
+    throw new Error(`workflow-pack.yaml in ${packDir}: grill must be an object`);
+  }
+  const g = raw as Record<string, unknown>;
+  const profile = g.question_profile;
+  if (profile !== 'default' && profile !== 'doc_grounded') {
+    throw new Error(
+      `workflow-pack.yaml in ${packDir}: grill.question_profile must be "default" or "doc_grounded", got "${profile}"`,
+    );
+  }
+  const maxQ = g.max_questions;
+  if (maxQ !== undefined) {
+    const n = Number(maxQ);
+    if (!Number.isInteger(n) || n < 1) {
+      throw new Error(
+        `workflow-pack.yaml in ${packDir}: grill.max_questions must be a positive integer`,
+      );
+    }
+  }
+  return {
+    question_profile: profile,
+    max_questions: maxQ !== undefined ? Number(maxQ) : undefined,
+  };
+}
+
+function parsePlanConfig(raw: unknown, packDir: string): PlanConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object') {
+    throw new Error(`workflow-pack.yaml in ${packDir}: plan must be an object`);
+  }
+  const p = raw as Record<string, unknown>;
+  const profile = p.verification_profile;
+  if (profile !== 'detected' && profile !== 'none') {
+    throw new Error(
+      `workflow-pack.yaml in ${packDir}: plan.verification_profile must be "detected" or "none", got "${profile}"`,
+    );
+  }
+  return { verification_profile: profile };
 }
 
 /**

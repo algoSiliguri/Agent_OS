@@ -38,12 +38,15 @@ import {
   buildWorkflowPackLoadFailedEvent,
 } from '../core/events';
 import { emitAndProject } from '../core/projector';
-import { loadWorkflowPacks } from '../core/workflow-pack-loader';
+import { loadWorkflowPacks, type GrillConfig, type PlanConfig } from '../core/workflow-pack-loader';
 import { PhaseRegistry } from '../core/phase-registry';
 import { runValidatorsForPhase } from '../core/validator-runner';
 import { type ArtifactType, taskArtifactPath, taskDir } from '../ccp/task-paths';
 import { defaultQuestionGenerator } from '../ccp/commands/shared/question-generator';
 import { defaultPlanDrafter } from '../ccp/commands/shared/plan-drafter';
+import { PackPlanDrafter } from '../core/pack-plan-drafter';
+import { detectDocs, type DetectedDoc } from '../core/doc-detector';
+import { PackQuestionGenerator } from '../core/pack-question-generator';
 import { makeShellStepExecutor } from '../ccp/commands/shared/step-executor';
 import {
   approveCandidate,
@@ -155,6 +158,8 @@ export default async function extension(pi: any): Promise<void> {
   // Loaded once per session; null = no pack installed (backward compat).
   let _phaseRegistry: PhaseRegistry | null = null;
   let _packLoadedForCwd: string | null = null;
+  let _grillConfig: GrillConfig | undefined = undefined;
+  let _planConfig: PlanConfig | undefined = undefined;
 
   // Updates the Pi status bar with the current task state. No-op if no active task.
   function refreshStatusBar(cwd: string, taskId: string | null, ctx: any): void {
@@ -167,31 +172,51 @@ export default async function extension(pi: any): Promise<void> {
 
   // Called at the top of every command handler. No-op after first successful load.
   // Never throws — pack loading is best-effort; existing commands must not break.
+  // v1.x policy: first valid pack (sorted by packId) is the active pack; extras ignored.
   function ensurePacksLoaded(cwd: string, ctx: any): void {
     if (!cwd || _packLoadedForCwd === cwd) return;
     _packLoadedForCwd = cwd;
+    _grillConfig = undefined;
+    _planConfig = undefined;
     try {
       const sessionId = randomUUID();
       const packResults = loadWorkflowPacks(cwd);
-      for (const result of packResults) {
+      // Deterministic selection: sort by packDir basename (= packId directory name).
+      const sorted = [...packResults].sort((a, b) => a.packDir.localeCompare(b.packDir));
+      let activePackId: string | null = null;
+      for (const result of sorted) {
         if (result.ok) {
-          _phaseRegistry = new PhaseRegistry(result.manifest);
-          if (ctx.hasUI) {
-            ctx.ui.setStatus(
-              'agent-os',
-              `Pack: ${result.manifest.workflow_pack_id} v${result.manifest.version}`,
-            );
-            setTimeout(() => ctx.ui.setStatus('agent-os', undefined), 5000);
+          if (activePackId === null) {
+            // First valid pack wins.
+            activePackId = result.manifest.workflow_pack_id;
+            _phaseRegistry = new PhaseRegistry(result.manifest);
+            _grillConfig = result.manifest.grill;
+            _planConfig = result.manifest.plan;
+            if (ctx.hasUI) {
+              ctx.ui.setStatus(
+                'agent-os',
+                `Pack: ${result.manifest.workflow_pack_id} v${result.manifest.version}`,
+              );
+              setTimeout(() => ctx.ui.setStatus('agent-os', undefined), 5000);
+            }
+            try {
+              emitAndProject(cwd, sessionId, buildWorkflowPackLoadedEvent({
+                sessionId,
+                packId: result.manifest.workflow_pack_id,
+                packVersion: result.manifest.version,
+                packDir: result.packDir,
+                phaseCount: result.manifest.phases.length,
+              }));
+            } catch { /* event write best-effort */ }
+          } else {
+            // Additional valid packs are ignored in v1.x.
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `Workflow pack ignored (v1.x supports one active pack): ${result.manifest.workflow_pack_id}. Active: ${activePackId}.`,
+                'info',
+              );
+            }
           }
-          try {
-            emitAndProject(cwd, sessionId, buildWorkflowPackLoadedEvent({
-              sessionId,
-              packId: result.manifest.workflow_pack_id,
-              packVersion: result.manifest.version,
-              packDir: result.packDir,
-              phaseCount: result.manifest.phases.length,
-            }));
-          } catch { /* event write best-effort */ }
         } else {
           if (ctx.hasUI) {
             ctx.ui.notify(`Workflow pack load failed: ${result.error}`, 'error');
@@ -317,6 +342,10 @@ export default async function extension(pi: any): Promise<void> {
       ctx.ui.setStatus('agent-os', undefined);
 
       if (result.ok) {
+        // Invalidate pack-load cache so the next command in this session picks up newly installed packs.
+        _packLoadedForCwd = null;
+        _grillConfig = undefined;
+        _planConfig = undefined;
         ctx.ui.notify(
           'Agent OS initialized ✓  Run /doctor to verify. Run /grill <idea> to start a task.',
           'info',
@@ -395,6 +424,42 @@ export default async function extension(pi: any): Promise<void> {
     },
   });
 
+  // ── grill generator factory ──────────────────────────────────────────────
+  // Shared by /grill and /flow handlers. Reads _grillConfig from loaded pack.
+  // Falls back to defaultQuestionGenerator for any missing/invalid config.
+  function buildGrillGenerator(
+    cwd: string,
+    ctx: any,
+  ): { generator: ReturnType<typeof defaultQuestionGenerator>; sourceDocs: DetectedDoc[] } {
+    if (!_phaseRegistry || !_grillConfig || _grillConfig.question_profile === 'default') {
+      return { generator: defaultQuestionGenerator(), sourceDocs: [] };
+    }
+    if (_grillConfig.question_profile === 'doc_grounded') {
+      let docs: DetectedDoc[] = [];
+      try {
+        docs = detectDocs(cwd);
+      } catch (e) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Doc detection failed: ${(e as Error).message} — using default questions`, 'info');
+        }
+      }
+      const maxQ = _grillConfig.max_questions ?? 8;
+      return { generator: new PackQuestionGenerator(docs, maxQ), sourceDocs: docs };
+    }
+    // Unknown profile — should not reach here if manifest validation worked.
+    return { generator: defaultQuestionGenerator(), sourceDocs: [] };
+  }
+
+  // ── plan drafter factory ─────────────────────────────────────────────────
+  // Shared by /plan, /flow, and /continue handlers.
+  function buildPlanDrafter(): ReturnType<typeof defaultPlanDrafter> {
+    if (!_phaseRegistry || !_planConfig) return defaultPlanDrafter();
+    if (_planConfig.verification_profile === 'detected' || _planConfig.verification_profile === 'none') {
+      return new PackPlanDrafter(_planConfig);
+    }
+    return defaultPlanDrafter();
+  }
+
   // ── /grill ───────────────────────────────────────────────────────────────
   pi.registerCommand('grill', {
     description: 'Start a new task. Usage: /grill <goal>',
@@ -407,13 +472,15 @@ export default async function extension(pi: any): Promise<void> {
       }
       ctx.ui.setStatus('agent-os', 'grilling…');
       try {
+        const { generator, sourceDocs } = buildGrillGenerator(ctx.cwd, ctx);
         const { taskId } = await runGrill({
           repoRoot: ctx.cwd,
           sessionId: randomUUID(),
           goal,
           userType: 'non_developer',
           ui: makePiUiAdapter(ctx.ui),
-          generator: defaultQuestionGenerator(),
+          generator,
+          sourceDocs,
         });
         refreshStatusBar(ctx.cwd, taskId, ctx);
         ctx.ui.notify(`Task ${taskId} created. Run /plan to draft the plan.`, 'info');
@@ -442,7 +509,7 @@ export default async function extension(pi: any): Promise<void> {
           sessionId: planSessionId,
           taskId,
           ui: makePiUiAdapter(ctx.ui),
-          drafter: defaultPlanDrafter(),
+          drafter: buildPlanDrafter(),
         });
         refreshStatusBar(ctx.cwd, taskId, ctx);
         if (outcome === 'approved') {
@@ -758,6 +825,7 @@ export default async function extension(pi: any): Promise<void> {
 
       // ── grill ──
       ctx.ui.setStatus('agent-os', 'flow: grilling…');
+      const { generator: grillGen, sourceDocs: grillDocs } = buildGrillGenerator(ctx.cwd, ctx);
       let taskId: string;
       try {
         ({ taskId } = await runGrill({
@@ -766,7 +834,8 @@ export default async function extension(pi: any): Promise<void> {
           goal,
           userType: 'non_developer',
           ui,
-          generator: defaultQuestionGenerator(),
+          generator: grillGen,
+          sourceDocs: grillDocs,
         }));
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
@@ -787,7 +856,7 @@ export default async function extension(pi: any): Promise<void> {
           sessionId: planSessionId,
           taskId,
           ui,
-          drafter: defaultPlanDrafter(),
+          drafter: buildPlanDrafter(),
         }));
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
@@ -995,7 +1064,7 @@ export default async function extension(pi: any): Promise<void> {
         case 'SHARED_UNDERSTANDING': {
           ctx.ui.notify(`${taskId} is in SHARED_UNDERSTANDING — running /plan`, 'info');
           try {
-            const { outcome } = await runPlan({ repoRoot: ctx.cwd, sessionId: sid, taskId, ui, drafter: defaultPlanDrafter() });
+            const { outcome } = await runPlan({ repoRoot: ctx.cwd, sessionId: sid, taskId, ui, drafter: buildPlanDrafter() });
             refreshStatusBar(ctx.cwd, taskId, ctx);
             ctx.ui.notify(outcome === 'approved' ? 'Plan approved. Run /continue to proceed.' : 'Plan rejected. Refine and /continue.', outcome === 'approved' ? 'info' : 'error');
           } catch (e) { ctx.ui.notify(`/continue (plan) failed: ${(e as Error).message}`, 'error'); }

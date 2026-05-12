@@ -42,9 +42,5 @@ export function parseInitArgs(rest: string): InitArgs {
     }
   }
 
-  if (flags.upgrade && flags.force) {
-    throw new Error('cannot combine --upgrade and --force');
-  }
-
   return { positional, flags };
 }

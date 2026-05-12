@@ -15,6 +15,7 @@ import { taskArtifactPath } from '../task-paths';
 import { setCurrentTaskId } from './shared/current-task';
 import { type QuestionGenerator, defaultQuestionGenerator } from './shared/question-generator';
 import { writeTaskState } from './shared/task-loader';
+import type { DetectedDoc } from '../../core/doc-detector';
 
 export interface RunGrillArgs {
   repoRoot: string;
@@ -23,6 +24,7 @@ export interface RunGrillArgs {
   userType: 'developer' | 'non_developer' | 'mixed';
   ui: UiAdapter;
   generator?: QuestionGenerator;
+  sourceDocs?: DetectedDoc[];
 }
 
 export interface GrillResult {
@@ -130,6 +132,9 @@ export async function runGrill(args: RunGrillArgs): Promise<GrillResult> {
       reason: proceed ? 'questions answered' : 'user stopped early',
     },
     open_blockers: [],
+    ...(args.sourceDocs && args.sourceDocs.length > 0
+      ? { source_docs: args.sourceDocs }
+      : {}),
   };
   writeArtifact(args.repoRoot, taskId, 'grill', record);
 

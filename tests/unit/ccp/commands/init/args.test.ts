@@ -44,7 +44,10 @@ describe('parseInitArgs', () => {
     });
   });
 
-  it('rejects --upgrade with --force', () => {
-    expect(() => parseInitArgs('--upgrade --force')).toThrow(/cannot.*combine/i);
+  it('allows --upgrade with --force (force-overwrite packs, preserve project.yaml)', () => {
+    expect(parseInitArgs('--upgrade --force')).toEqual({
+      positional: undefined,
+      flags: { upgrade: true, force: true },
+    });
   });
 });

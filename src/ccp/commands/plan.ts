@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { emitAndProject } from '../../core/projector';
+import { PackPlanDrafter } from '../../core/pack-plan-drafter';
+import { loadWorkflowPacks } from '../../core/workflow-pack-loader';
 import type { UiAdapter } from '../../pi/ui';
 import { makeEnvelope } from '../artifacts/envelope';
 import { readArtifact, readArtifactRaw, writeArtifact } from '../artifacts/io';
@@ -12,6 +14,20 @@ import {
 import { type PlanDrafter, defaultPlanDrafter } from './shared/plan-drafter';
 import { requireTaskState, writeTaskState } from './shared/task-loader';
 import { emitPolicyDecision } from './shared/policy-decision-writer';
+
+function buildPlanDrafterFromActivePack(repoRoot: string): PlanDrafter {
+  try {
+    const packs = loadWorkflowPacks(repoRoot);
+    const sorted = [...packs].sort((a, b) => a.packDir.localeCompare(b.packDir));
+    const active = sorted.find((r) => r.ok);
+    if (active?.ok && active.manifest.plan) {
+      return new PackPlanDrafter(active.manifest.plan);
+    }
+  } catch {
+    // best-effort — fall through
+  }
+  return defaultPlanDrafter();
+}
 
 export type PlanOutcome = 'approved' | 'rejected';
 
@@ -79,7 +95,7 @@ export async function runPlan(args: RunPlanArgs): Promise<{ outcome: PlanOutcome
     grillGoal = String(diagnosis?.bug_summary ?? 'bugfix task');
   }
 
-  const drafter = args.drafter ?? defaultPlanDrafter();
+  const drafter = args.drafter ?? buildPlanDrafterFromActivePack(args.repoRoot);
   const draft = await drafter.draft({
     goal: grillGoal,
     assumptions: grillAssumptions,
@@ -168,7 +184,8 @@ export async function runPlan(args: RunPlanArgs): Promise<{ outcome: PlanOutcome
 }
 
 function renderPlanSummary(draft: {
-  steps: Array<{ title: string; risk_tier: string; commands: Array<unknown> }>;
+  steps: Array<{ title: string; risk_tier: string; commands: Array<unknown>; verification: Array<unknown> }>;
+  detectedCommands?: Array<{ command: string; source_file: string; confidence: 'high' | 'low' }>;
 }): string {
   const lines = draft.steps.map((s, i) => {
     const cmdNote = s.commands.length === 0
@@ -176,9 +193,24 @@ function renderPlanSummary(draft: {
       : ` — ${s.commands.length} command(s)`;
     return `  ${i + 1}. ${s.title} (risk: ${s.risk_tier})${cmdNote}`;
   });
+
+  let verificationLine = '';
+  if (draft.detectedCommands !== undefined) {
+    if (draft.detectedCommands.length === 0) {
+      verificationLine = '\nVerification: NONE DETECTED — no root-level test command found. Edit plan.yaml before /run.';
+    } else {
+      const [first, ...rest] = draft.detectedCommands;
+      verificationLine = `\nVerification: ${first!.command} (detected from ${first!.source_file})`;
+      if (rest.length > 0) {
+        const alts = rest.map((d) => `${d.command} (${d.source_file})`).join(', ');
+        verificationLine += `\nAlso detected: ${alts}`;
+      }
+    }
+  }
+
   const hasEmptySteps = draft.steps.some((s) => s.commands.length === 0);
   const hint = hasEmptySteps
     ? '\n\nPlan has steps with no commands. Fill in commands in .agent-os/tasks/<id>/plan.yaml before /run will do real work.'
     : '';
-  return `PLAN — ${draft.steps.length} steps:\n${lines.join('\n')}${hint}`;
+  return `PLAN — ${draft.steps.length} steps:\n${lines.join('\n')}${verificationLine}${hint}`;
 }

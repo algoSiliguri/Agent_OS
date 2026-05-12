@@ -23,6 +23,8 @@ export interface DraftedPlan {
   steps: DraftedStep[];
   approval_required: Array<{ id: string; reason: string }>;
   rollback: { strategy: string };
+  /** UX-only. Not persisted to PlanArtifact. Surfaced in renderPlanSummary. */
+  detectedCommands?: Array<{ command: string; source_file: string; confidence: 'high' | 'low' }>;
 }
 
 export interface PlanDrafter {

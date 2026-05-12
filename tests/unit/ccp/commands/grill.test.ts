@@ -7,6 +7,7 @@ import { runGrill } from '../../../../src/ccp/commands/grill';
 import { taskArtifactPath, taskStatePath } from '../../../../src/ccp/task-paths';
 import { readEvents } from '../../../../src/core/event-log';
 import { sessionEventsPath } from '../../../../src/core/runtime-paths';
+import type { DetectedDoc } from '../../../../src/core/doc-detector';
 
 function fixture(): string {
   const dir = mkdtempSync(join(tmpdir(), 'aos-grl-'));
@@ -63,6 +64,43 @@ describe('runGrill', () => {
     expect(events.find((e) => e.event_type === 'SHARED_UNDERSTANDING_CREATED')).toBeTruthy();
     expect(events.filter((e) => e.event_type === 'QUESTION_ASKED').length).toBeGreaterThan(0);
     expect(events.filter((e) => e.event_type === 'ANSWER_RECORDED').length).toBeGreaterThan(0);
+  });
+
+  it('sourceDocs provided → artifact contains source_docs', async () => {
+    const dir = fixture();
+    const ui = scriptedUi(['done']);
+    const sourceDocs: DetectedDoc[] = [
+      { path: 'README.md', title: 'My Project', bytes: 512, reason: 'known-root' },
+    ];
+    const result = await runGrill({
+      repoRoot: dir,
+      sessionId: 's1',
+      goal: 'add feature',
+      userType: 'developer',
+      ui,
+      sourceDocs,
+    });
+    const yaml = YAML.parse(readFileSync(taskArtifactPath(dir, result.taskId, 'grill'), 'utf-8'));
+    expect(Array.isArray(yaml.source_docs)).toBe(true);
+    expect(yaml.source_docs[0].path).toBe('README.md');
+    expect(yaml.source_docs[0].title).toBe('My Project');
+  });
+
+  it('sourceDocs omitted → artifact remains valid without source_docs', async () => {
+    const dir = fixture();
+    const ui = scriptedUi(['done']);
+    const result = await runGrill({
+      repoRoot: dir,
+      sessionId: 's1',
+      goal: 'add feature',
+      userType: 'developer',
+      ui,
+      // sourceDocs deliberately omitted
+    });
+    const yaml = YAML.parse(readFileSync(taskArtifactPath(dir, result.taskId, 'grill'), 'utf-8'));
+    expect(yaml.goal).toBe('add feature');
+    // source_docs should not be present (no docs, no field)
+    expect(yaml.source_docs).toBeUndefined();
   });
 
   it('marks decision.proceed=false if user types "stop"', async () => {
