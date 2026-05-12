@@ -41,6 +41,13 @@ const Constraint = Type.Object({ id: Type.String(), text: Type.String() });
 const SuccessCriterion = Type.Object({ id: Type.String(), text: Type.String() });
 const Blocker = Type.Object({ id: Type.String(), blocker: Type.String() });
 
+const SourceDoc = Type.Object({
+  path: Type.String(),
+  title: Type.String(),
+  bytes: Type.Number(),
+  reason: Type.String(),
+});
+
 export const GrillRecord = Type.Intersect([
   ArtifactEnvelope,
   Type.Object({
@@ -62,6 +69,7 @@ export const GrillRecord = Type.Intersect([
       reason: Type.String(),
     }),
     open_blockers: Type.Array(Blocker),
+    source_docs: Type.Optional(Type.Array(SourceDoc)),
   }),
 ]);
 export type GrillRecord = Static<typeof GrillRecord>;

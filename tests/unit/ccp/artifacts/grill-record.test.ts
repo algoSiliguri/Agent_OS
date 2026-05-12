@@ -74,4 +74,42 @@ describe('GrillRecord', () => {
     };
     expect(Value.Check(GrillRecord, bad)).toBe(false);
   });
+
+  it('accepts record with source_docs', () => {
+    const record = {
+      ...env,
+      goal: 'Add rate limit',
+      user_type: 'developer',
+      problem_statement: 'No rate limiting on auth endpoint',
+      assumptions: [],
+      questions: [],
+      risks: [],
+      constraints: [],
+      success_criteria: [],
+      decision: { proceed: true, reason: 'ok' },
+      open_blockers: [],
+      source_docs: [
+        { path: 'CONTRIBUTING.md', title: 'Contributing Guide', bytes: 1024, reason: 'known-root' },
+      ],
+    };
+    expect(Value.Check(GrillRecord, record)).toBe(true);
+  });
+
+  it('accepts record without source_docs (optional field)', () => {
+    const record = {
+      ...env,
+      goal: 'Add feature',
+      user_type: 'developer',
+      problem_statement: 'Need feature',
+      assumptions: [],
+      questions: [],
+      risks: [],
+      constraints: [],
+      success_criteria: [],
+      decision: { proceed: true, reason: 'ok' },
+      open_blockers: [],
+      // no source_docs
+    };
+    expect(Value.Check(GrillRecord, record)).toBe(true);
+  });
 });

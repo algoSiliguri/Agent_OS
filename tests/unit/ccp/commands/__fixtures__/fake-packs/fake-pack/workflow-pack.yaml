@@ -1,0 +1,14 @@
+workflow_pack_id: fake-pack
+version: "1.0.0"
+schema_version: "1.0.0"
+runtime_target: pi
+min_agent_os_version: "1.3.0"
+phases:
+  - id: grill
+    agent_os_command: /grill
+    allowed_predecessors: []
+    produces: [GrillRecord]
+    may_edit_source: false
+    requires_approval: false
+    validators: []
+validators: []

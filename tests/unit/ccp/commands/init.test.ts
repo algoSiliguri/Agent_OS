@@ -1,9 +1,14 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { runInit } from '../../../../src/ccp/commands/init';
 import type { UiAdapter } from '../../../../src/pi/ui';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// Minimal fake packs source: one valid copilot-workflow pack dir
+const FAKE_PACKS_SRC = join(__dirname, '__fixtures__', 'fake-packs');
 
 function noopUi(): UiAdapter {
   return {
@@ -27,6 +32,7 @@ describe('runInit', () => {
       ui: noopUi(),
       log: () => {},
       exec,
+      packsSourceRoot: FAKE_PACKS_SRC,
     });
 
     expect(existsSync(join(targetRoot, '.agent-os', 'project.yaml'))).toBe(true);
@@ -37,6 +43,11 @@ describe('runInit', () => {
     const yaml = readFileSync(join(targetRoot, '.agent-os', 'project.yaml'), 'utf8');
     expect(yaml).toContain('project_id: my-project');
     expect(yaml).toContain('verification_profile: production');
+
+    // pack installed from fake source
+    expect(
+      existsSync(join(targetRoot, '.agent-os', 'packs', 'fake-pack', 'workflow-pack.yaml')),
+    ).toBe(true);
   });
 
   it('refuses on existing project.yaml without --force/--upgrade', async () => {

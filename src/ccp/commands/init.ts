@@ -4,6 +4,7 @@ import type { UiAdapter } from '../../pi/ui';
 import { parseInitArgs } from './init/args';
 import { ensureBrainCli } from './init/brain-installer';
 import { GOVERNANCE_FILES, bundledGovernanceRoot, copyGovernance } from './init/governance';
+import { bundledPacksSourceRoot, installBundledPacks } from './init/pack-installer';
 import { runPreflight } from './init/preflight';
 import { type PromptInputs, collectPrompts } from './init/prompts';
 import { renderProjectYaml } from './init/template';
@@ -16,6 +17,7 @@ export interface RunInitOptions {
   log: (msg: string) => void;
   exec?: (cmd: string) => string;
   sourceRoot?: string;
+  packsSourceRoot?: string;
 }
 
 export type RunInitResult = { ok: true } | { ok: false };
@@ -27,6 +29,7 @@ export async function runInit({
   log,
   exec,
   sourceRoot,
+  packsSourceRoot,
 }: RunInitOptions): Promise<RunInitResult> {
   let parsed: ReturnType<typeof parseInitArgs>;
   try {
@@ -47,9 +50,15 @@ export async function runInit({
   }
 
   if (upgrade) {
-    log('[1/2] copying bundled governance files…');
+    log('[1/3] copying bundled governance files…');
     copyGovernance({ sourceRoot: sourceRoot ?? bundledGovernanceRoot(), targetRoot });
-    log('[2/2] done. project.yaml preserved.');
+    log('[2/3] installing bundled workflow packs…');
+    installBundledPacks({
+      sourceRoot: packsSourceRoot ?? bundledPacksSourceRoot(),
+      targetRoot,
+      force,
+    });
+    log('[3/3] done. project.yaml preserved.');
     return { ok: true };
   }
 
@@ -74,7 +83,7 @@ export async function runInit({
     return { ok: false };
   }
 
-  log('[1/4] ensuring brain CLI is installed…');
+  log('[1/5] ensuring brain CLI is installed…');
   try {
     ensureBrainCli({ exec });
   } catch (e) {
@@ -82,10 +91,10 @@ export async function runInit({
     return { ok: false };
   }
 
-  log('[2/4] copying bundled governance files…');
+  log('[2/5] copying bundled governance files…');
   copyGovernance({ sourceRoot: sourceRoot ?? bundledGovernanceRoot(), targetRoot });
 
-  log('[3/4] creating runtime dirs…');
+  log('[3/5] creating runtime dirs…');
   mkdirSync(join(targetRoot, '.agent-os', 'runtime'), { recursive: true });
   mkdirSync(join(targetRoot, '.agent-os', 'tasks'), { recursive: true });
 
@@ -101,7 +110,14 @@ export async function runInit({
     appendFileSync(gitignorePath, append);
   }
 
-  log('[4/4] rendering project.yaml…');
+  log('[4/5] installing bundled workflow packs…');
+  installBundledPacks({
+    sourceRoot: packsSourceRoot ?? bundledPacksSourceRoot(),
+    targetRoot,
+    force,
+  });
+
+  log('[5/5] rendering project.yaml…');
   const yaml = renderProjectYaml({
     projectId: inputs.projectId,
     domainType: inputs.domainType,

@@ -1,5 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import YAML from 'yaml';
+import { bundledPacksSourceRoot } from '../ccp/commands/init/pack-installer';
+import { compareSemver } from './semver';
 import { verifyConstitution } from './constitution';
 import { loadProjectConfig } from './manifest';
 
@@ -15,7 +18,69 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
-export function runDoctor(repoRoot: string): DoctorReport {
+/** Read the `version` field from a workflow-pack.yaml. Returns null on any error. */
+function readPackVersion(manifestPath: string): string | null {
+  try {
+    if (!existsSync(manifestPath)) return null;
+    const raw = YAML.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+    const v = raw?.version;
+    return typeof v === 'string' && v ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface PackVersionDetail {
+  packId: string;
+  installedVersion: string | null;
+  bundledVersion: string | null;
+  /** 'current' | 'stale' | 'newer' | 'unknown' | 'no-bundled' */
+  state: 'current' | 'stale' | 'newer' | 'unknown' | 'no-bundled';
+  detail: string;
+}
+
+/** Visible for testing — compares installed vs bundled version for a single pack. */
+export function resolvePackVersionDetail(
+  packId: string,
+  installedManifestPath: string,
+  bundledManifestPath: string,
+): PackVersionDetail {
+  const installedVersion = readPackVersion(installedManifestPath);
+  const bundledVersion = readPackVersion(bundledManifestPath);
+
+  if (!installedVersion) {
+    return { packId, installedVersion, bundledVersion, state: 'unknown', detail: `${packId} (version unknown)` };
+  }
+  if (!bundledVersion) {
+    return { packId, installedVersion, bundledVersion, state: 'no-bundled', detail: `${packId} v${installedVersion}` };
+  }
+
+  const cmp = compareSemver(installedVersion, bundledVersion);
+  if (cmp === null) {
+    return { packId, installedVersion, bundledVersion, state: 'unknown', detail: `${packId} (version unknown)` };
+  }
+  if (cmp < 0) {
+    return {
+      packId, installedVersion, bundledVersion, state: 'stale',
+      detail: `${packId} v${installedVersion} is older than bundled v${bundledVersion} — run /init --upgrade --force`,
+    };
+  }
+  if (cmp > 0) {
+    return {
+      packId, installedVersion, bundledVersion, state: 'newer',
+      detail: `${packId} v${installedVersion} (newer than bundled v${bundledVersion})`,
+    };
+  }
+  return { packId, installedVersion, bundledVersion, state: 'current', detail: `${packId} v${installedVersion} (current)` };
+}
+
+export interface RunDoctorOptions {
+  /** Override the bundled packs source root for testing. Defaults to bundledPacksSourceRoot(). */
+  bundledPacksRoot?: string;
+}
+
+export function runDoctor(repoRoot: string, opts: RunDoctorOptions = {}): DoctorReport {
+  const resolvedBundledPacksRoot = opts.bundledPacksRoot ?? bundledPacksSourceRoot();
   const checks: DoctorCheck[] = [];
 
   const constitutionPath = join(repoRoot, 'AGENT_OS_CONSTITUTION.md');
@@ -124,6 +189,55 @@ export function runDoctor(repoRoot: string): DoctorReport {
         description: '.agent-os/install-manifest.json is valid',
         status: 'soft_fail',
         detail: 'File exists but could not parse JSON. Re-run setup.sh',
+      });
+    }
+  }
+
+  const packsDir = join(repoRoot, '.agent-os', 'packs');
+  if (!existsSync(packsDir)) {
+    checks.push({
+      id: 'workflow_packs',
+      description: 'Workflow packs installed',
+      status: 'soft_fail',
+      detail: 'No packs installed. Run: /init --upgrade',
+    });
+  } else {
+    let validPacks: string[] = [];
+    try {
+      validPacks = readdirSync(packsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && existsSync(join(packsDir, d.name, 'workflow-pack.yaml')))
+        .map((d) => d.name);
+    } catch { /* best-effort */ }
+
+    if (validPacks.length === 0) {
+      checks.push({
+        id: 'workflow_packs',
+        description: 'Workflow packs installed',
+        status: 'soft_fail',
+        detail: 'Packs directory exists but no valid packs found. Run: /init --upgrade',
+      });
+    } else {
+      // Check each installed pack's version against the bundled version.
+      const packDetails: string[] = [];
+      let anyStale = false;
+
+      for (const packId of validPacks) {
+        const pvd = resolvePackVersionDetail(
+          packId,
+          join(packsDir, packId, 'workflow-pack.yaml'),
+          join(resolvedBundledPacksRoot, packId, 'workflow-pack.yaml'),
+        );
+        packDetails.push(pvd.detail);
+        if (pvd.state === 'stale' || pvd.state === 'unknown') {
+          anyStale = true;
+        }
+      }
+
+      checks.push({
+        id: 'workflow_packs',
+        description: 'Workflow packs installed',
+        status: anyStale ? 'soft_fail' : 'pass',
+        detail: packDetails.join('; '),
       });
     }
   }
