@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { emitAndProject } from '../../core/projector';
 import { PackPlanDrafter } from '../../core/pack-plan-drafter';
+import { emitAndProject } from '../../core/projector';
 import { loadWorkflowPacks } from '../../core/workflow-pack-loader';
 import type { UiAdapter } from '../../pi/ui';
 import { makeEnvelope } from '../artifacts/envelope';
@@ -9,11 +9,9 @@ import {
   buildPlanApprovedEvent,
   buildPlanCreatedEvent,
   buildPlanRejectedEvent,
-  buildTaskStateTransitionEvent,
 } from '../ccp-events';
 import { type PlanDrafter, defaultPlanDrafter } from './shared/plan-drafter';
-import { requireTaskState, writeTaskState } from './shared/task-loader';
-import { emitPolicyDecision } from './shared/policy-decision-writer';
+import { transitionTaskLifecycle } from './shared/task-lifecycle';
 
 function buildPlanDrafterFromActivePack(repoRoot: string): PlanDrafter {
   try {
@@ -40,34 +38,19 @@ export interface RunPlanArgs {
 }
 
 export async function runPlan(args: RunPlanArgs): Promise<{ outcome: PlanOutcome }> {
-  try {
-    requireTaskState(args.repoRoot, args.taskId, ['SHARED_UNDERSTANDING']);
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/plan',
-      actionRequested: 'enter PLANNING', decision: 'allow', reasonCode: 'state_ok',
-      reason: 'state is SHARED_UNDERSTANDING', source: 'command_handler',
-    });
-  } catch (e) {
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/plan',
-      actionRequested: 'enter PLANNING', decision: 'block', reasonCode: 'wrong_state',
-      reason: (e as Error).message, source: 'command_handler',
-    });
-    throw e;
-  }
-
-  emitAndProject(
-    args.repoRoot,
-    args.sessionId,
-    buildTaskStateTransitionEvent({
-      sessionId: args.sessionId,
-      taskId: args.taskId,
-      from: 'SHARED_UNDERSTANDING',
-      to: 'PLANNING',
-      triggeredBy: '/plan',
-    }),
-  );
-  writeTaskState(args.repoRoot, args.taskId, 'PLANNING');
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: ['SHARED_UNDERSTANDING'],
+    to: 'PLANNING',
+    triggeredBy: '/plan',
+    policy: {
+      subjectName: '/plan',
+      actionRequested: 'enter PLANNING',
+      allowReason: 'state is SHARED_UNDERSTANDING',
+    },
+  });
 
   // Diagnose tasks have no grill.yaml — fall back to diagnosis.yaml for goal.
   let grillGoal = '';
@@ -130,18 +113,14 @@ export async function runPlan(args: RunPlanArgs): Promise<{ outcome: PlanOutcome
     }),
   );
 
-  emitAndProject(
-    args.repoRoot,
-    args.sessionId,
-    buildTaskStateTransitionEvent({
-      sessionId: args.sessionId,
-      taskId: args.taskId,
-      from: 'PLANNING',
-      to: 'AWAITING_PLAN_APPROVAL',
-      triggeredBy: '/plan (drafted)',
-    }),
-  );
-  writeTaskState(args.repoRoot, args.taskId, 'AWAITING_PLAN_APPROVAL');
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: ['PLANNING'],
+    to: 'AWAITING_PLAN_APPROVAL',
+    triggeredBy: '/plan (drafted)',
+  });
 
   const summary = renderPlanSummary(draft);
   const approved = await args.ui.confirm(`${summary}\n\nApprove this plan?`);
@@ -156,18 +135,14 @@ export async function runPlan(args: RunPlanArgs): Promise<{ outcome: PlanOutcome
         reason: 'user rejected',
       }),
     );
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: 'AWAITING_PLAN_APPROVAL',
-        to: 'SHARED_UNDERSTANDING',
-        triggeredBy: '/plan (rejected)',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'SHARED_UNDERSTANDING');
+    transitionTaskLifecycle({
+      repoRoot: args.repoRoot,
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      allowedFrom: ['AWAITING_PLAN_APPROVAL'],
+      to: 'SHARED_UNDERSTANDING',
+      triggeredBy: '/plan (rejected)',
+    });
     return { outcome: 'rejected' };
   }
 
@@ -184,20 +159,27 @@ export async function runPlan(args: RunPlanArgs): Promise<{ outcome: PlanOutcome
 }
 
 function renderPlanSummary(draft: {
-  steps: Array<{ title: string; risk_tier: string; commands: Array<unknown>; verification: Array<unknown> }>;
+  steps: Array<{
+    title: string;
+    risk_tier: string;
+    commands: Array<unknown>;
+    verification: Array<unknown>;
+  }>;
   detectedCommands?: Array<{ command: string; source_file: string; confidence: 'high' | 'low' }>;
 }): string {
   const lines = draft.steps.map((s, i) => {
-    const cmdNote = s.commands.length === 0
-      ? ' — ⚠ no commands (edit plan.yaml before approving)'
-      : ` — ${s.commands.length} command(s)`;
+    const cmdNote =
+      s.commands.length === 0
+        ? ' — ⚠ no commands (edit plan.yaml before approving)'
+        : ` — ${s.commands.length} command(s)`;
     return `  ${i + 1}. ${s.title} (risk: ${s.risk_tier})${cmdNote}`;
   });
 
   let verificationLine = '';
   if (draft.detectedCommands !== undefined) {
     if (draft.detectedCommands.length === 0) {
-      verificationLine = '\nVerification: NONE DETECTED — no root-level test command found. Edit plan.yaml before /run.';
+      verificationLine =
+        '\nVerification: NONE DETECTED — no root-level test command found. Edit plan.yaml before /run.';
     } else {
       const [first, ...rest] = draft.detectedCommands;
       verificationLine = `\nVerification: ${first!.command} (detected from ${first!.source_file})`;

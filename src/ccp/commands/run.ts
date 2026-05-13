@@ -9,11 +9,9 @@ import {
   buildStepCompletedEvent,
   buildStepFailedEvent,
   buildStepStartedEvent,
-  buildTaskStateTransitionEvent,
 } from '../ccp-events';
 import type { StepExecutionResult, StepExecutor } from './shared/step-executor';
-import { requireTaskState, writeTaskState } from './shared/task-loader';
-import { emitPolicyDecision } from './shared/policy-decision-writer';
+import { prepareTaskLifecycleTransition, transitionTaskLifecycle } from './shared/task-lifecycle';
 
 export interface RunArgs {
   repoRoot: string;
@@ -26,22 +24,22 @@ export interface RunArgs {
 export type RunOutcome = 'verifying' | 'failed_recoverable' | 'failed_blocked';
 
 export async function runRun(args: RunArgs): Promise<{ outcome: RunOutcome }> {
-  const allowedPre = args.resume ? ['FAILED_RECOVERABLE'] : ['AWAITING_PLAN_APPROVAL'];
-  try {
-    requireTaskState(args.repoRoot, args.taskId, allowedPre);
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/run',
-      actionRequested: 'enter EXECUTING', decision: 'allow', reasonCode: 'state_ok',
-      reason: `state in ${allowedPre.join(' | ')}`, source: 'command_handler',
-    });
-  } catch (e) {
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/run',
-      actionRequested: 'enter EXECUTING', decision: 'block', reasonCode: 'wrong_state',
-      reason: (e as Error).message, source: 'command_handler',
-    });
-    throw e;
-  }
+  const allowedPre = args.resume
+    ? (['FAILED_RECOVERABLE'] as const)
+    : (['AWAITING_PLAN_APPROVAL'] as const);
+  const executionTransition = prepareTaskLifecycleTransition({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: allowedPre,
+    to: 'EXECUTING',
+    triggeredBy: args.resume ? '/run --resume' : '/run',
+    policy: {
+      subjectName: '/run',
+      actionRequested: 'enter EXECUTING',
+      allowReason: `state in ${allowedPre.join(' | ')}`,
+    },
+  });
 
   const plan = readArtifact(args.repoRoot, args.taskId, 'plan') as unknown as {
     steps: Array<{
@@ -63,18 +61,7 @@ export async function runRun(args: RunArgs): Promise<{ outcome: RunOutcome }> {
     startedAt = existing.started_at;
   }
 
-  emitAndProject(
-    args.repoRoot,
-    args.sessionId,
-    buildTaskStateTransitionEvent({
-      sessionId: args.sessionId,
-      taskId: args.taskId,
-      from: args.resume ? 'FAILED_RECOVERABLE' : 'AWAITING_PLAN_APPROVAL',
-      to: 'EXECUTING',
-      triggeredBy: args.resume ? '/run --resume' : '/run',
-    }),
-  );
-  writeTaskState(args.repoRoot, args.taskId, 'EXECUTING');
+  executionTransition.commit();
 
   const completed = new Set(priorSteps.map((s) => s.step_id));
   const collectedSteps: Array<StepExecutionResult & { step_id: string }> = [...priorSteps];
@@ -176,44 +163,32 @@ export async function runRun(args: RunArgs): Promise<{ outcome: RunOutcome }> {
   });
 
   if (outcome === 'verifying') {
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: 'EXECUTING',
-        to: 'VERIFYING',
-        triggeredBy: '/run (steps complete)',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'VERIFYING');
+    transitionTaskLifecycle({
+      repoRoot: args.repoRoot,
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      allowedFrom: ['EXECUTING'],
+      to: 'VERIFYING',
+      triggeredBy: '/run (steps complete)',
+    });
   } else if (outcome === 'failed_recoverable') {
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: 'EXECUTING',
-        to: 'FAILED_RECOVERABLE',
-        triggeredBy: '/run (step failed)',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'FAILED_RECOVERABLE');
+    transitionTaskLifecycle({
+      repoRoot: args.repoRoot,
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      allowedFrom: ['EXECUTING'],
+      to: 'FAILED_RECOVERABLE',
+      triggeredBy: '/run (step failed)',
+    });
   } else {
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: 'EXECUTING',
-        to: 'FAILED_BLOCKED',
-        triggeredBy: '/run (unrecoverable)',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'FAILED_BLOCKED');
+    transitionTaskLifecycle({
+      repoRoot: args.repoRoot,
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      allowedFrom: ['EXECUTING'],
+      to: 'FAILED_BLOCKED',
+      triggeredBy: '/run (unrecoverable)',
+    });
   }
 
   return { outcome };

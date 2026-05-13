@@ -30,6 +30,26 @@ fresh Pi session.
 
 Plus side branches: `FAILED_RECOVERABLE`, `FAILED_BLOCKED`, `ABORTED`.
 
+## Task lifecycle
+
+The Task lifecycle Module owns task birth and transition mechanics: emitting
+`TASK_CREATED`, writing initial `NEW_IDEA`, checking the current state,
+validating the state machine edge, emitting any phase-transition policy
+decision, projecting the `TASK_STATE_TRANSITION` event, writing `state.json`,
+and emitting terminal lifecycle events such as `TASK_COMPLETED` and
+`TASK_ABORTED`. Slash command Modules still own workflow intent: task
+allocation, current-task selection, which prior states they allow, which target
+state they enter, and command-specific work.
+
+## Command runner
+
+The Command runner Module owns local shell execution semantics: invoking
+commands through the platform shell, timeout defaults, stdout/stderr capture,
+exit-code normalization, and duration measurement. Step execution and
+verification are Adapters over this Module: step execution adds scope checking
+and execution-record shaping, while verification consumes command outcomes for
+verification records.
+
 ## Six artifacts
 
 Each task produces these YAML artifacts at `.agent-os/tasks/<task-id>/`:

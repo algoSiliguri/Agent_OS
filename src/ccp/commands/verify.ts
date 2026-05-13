@@ -2,14 +2,12 @@ import { emitAndProject } from '../../core/projector';
 import { makeEnvelope } from '../artifacts/envelope';
 import { readArtifact, writeArtifact } from '../artifacts/io';
 import {
-  buildTaskStateTransitionEvent,
   buildVerificationFailedEvent,
   buildVerificationPassedEvent,
   buildVerificationStartedEvent,
 } from '../ccp-events';
 import { compressOutput } from './shared/compressed-output';
-import { requireTaskState, writeTaskState } from './shared/task-loader';
-import { emitPolicyDecision } from './shared/policy-decision-writer';
+import { transitionTaskLifecycle } from './shared/task-lifecycle';
 
 export interface VerificationRunner {
   runCommand(cmd: string): Promise<{ exitCode: number; stdout: string; stderr: string }>;
@@ -25,37 +23,20 @@ export interface VerifyArgs {
 export type VerifyResult = 'pass' | 'fail' | 'blocked';
 
 export async function runVerify(args: VerifyArgs): Promise<{ result: VerifyResult }> {
-  const allowedVerify = ['VERIFYING', 'AWAITING_HUMAN_REVIEW', 'FAILED_RECOVERABLE'];
-  let currentState: string;
-  try {
-    currentState = requireTaskState(args.repoRoot, args.taskId, allowedVerify);
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/verify',
-      actionRequested: 'enter VERIFYING', decision: 'allow', reasonCode: 'state_ok',
-      reason: `state in ${allowedVerify.join(' | ')}`, source: 'command_handler',
-    });
-  } catch (e) {
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/verify',
-      actionRequested: 'enter VERIFYING', decision: 'block', reasonCode: 'wrong_state',
-      reason: (e as Error).message, source: 'command_handler',
-    });
-    throw e;
-  }
-  if (currentState !== 'VERIFYING') {
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: currentState,
-        to: 'VERIFYING',
-        triggeredBy: '/verify',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'VERIFYING');
-  }
+  const allowedVerify = ['VERIFYING', 'AWAITING_HUMAN_REVIEW', 'FAILED_RECOVERABLE'] as const;
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: allowedVerify,
+    to: 'VERIFYING',
+    triggeredBy: '/verify',
+    policy: {
+      subjectName: '/verify',
+      actionRequested: 'enter VERIFYING',
+      allowReason: `state in ${allowedVerify.join(' | ')}`,
+    },
+  });
   emitAndProject(
     args.repoRoot,
     args.sessionId,
@@ -117,18 +98,14 @@ export async function runVerify(args: VerifyArgs): Promise<{ result: VerifyResul
       args.sessionId,
       buildVerificationPassedEvent({ sessionId: args.sessionId, taskId: args.taskId }),
     );
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: 'VERIFYING',
-        to: 'AWAITING_HUMAN_REVIEW',
-        triggeredBy: '/verify (pass)',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'AWAITING_HUMAN_REVIEW');
+    transitionTaskLifecycle({
+      repoRoot: args.repoRoot,
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      allowedFrom: ['VERIFYING'],
+      to: 'AWAITING_HUMAN_REVIEW',
+      triggeredBy: '/verify (pass)',
+    });
   } else {
     emitAndProject(
       args.repoRoot,
@@ -140,18 +117,14 @@ export async function runVerify(args: VerifyArgs): Promise<{ result: VerifyResul
         nextAction: next_action ?? 'fix and re-run',
       }),
     );
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: 'VERIFYING',
-        to: 'FAILED_RECOVERABLE',
-        triggeredBy: '/verify (fail)',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'FAILED_RECOVERABLE');
+    transitionTaskLifecycle({
+      repoRoot: args.repoRoot,
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      allowedFrom: ['VERIFYING'],
+      to: 'FAILED_RECOVERABLE',
+      triggeredBy: '/verify (fail)',
+    });
   }
 
   return { result };

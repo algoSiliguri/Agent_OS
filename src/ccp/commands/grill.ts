@@ -1,3 +1,4 @@
+import type { DetectedDoc } from '../../core/doc-detector';
 import { emitAndProject } from '../../core/projector';
 import type { UiAdapter } from '../../pi/ui';
 import { makeEnvelope } from '../artifacts/envelope';
@@ -7,15 +8,12 @@ import {
   buildGrillStartedEvent,
   buildQuestionAskedEvent,
   buildSharedUnderstandingCreatedEvent,
-  buildTaskCreatedEvent,
-  buildTaskStateTransitionEvent,
 } from '../ccp-events';
 import { allocateNextTaskId } from '../task-id';
 import { taskArtifactPath } from '../task-paths';
 import { setCurrentTaskId } from './shared/current-task';
 import { type QuestionGenerator, defaultQuestionGenerator } from './shared/question-generator';
-import { writeTaskState } from './shared/task-loader';
-import type { DetectedDoc } from '../../core/doc-detector';
+import { createTaskLifecycle, transitionTaskLifecycle } from './shared/task-lifecycle';
 
 export interface RunGrillArgs {
   repoRoot: string;
@@ -36,30 +34,26 @@ export async function runGrill(args: RunGrillArgs): Promise<GrillResult> {
   const taskId = allocateNextTaskId(args.repoRoot);
   setCurrentTaskId(args.repoRoot, taskId);
 
+  createTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId,
+    goal: args.goal,
+    userType: args.userType,
+  });
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId,
+    allowedFrom: ['NEW_IDEA'],
+    to: 'GRILLING',
+    triggeredBy: '/grill',
+  });
   emitAndProject(
     args.repoRoot,
     args.sessionId,
-    buildTaskCreatedEvent({
-      sessionId: args.sessionId,
-      taskId,
-      goal: args.goal,
-      userType: args.userType,
-    }),
+    buildGrillStartedEvent({ sessionId: args.sessionId, taskId }),
   );
-  writeTaskState(args.repoRoot, taskId, 'NEW_IDEA', args.sessionId);
-  emitAndProject(
-    args.repoRoot,
-    args.sessionId,
-    buildTaskStateTransitionEvent({
-      sessionId: args.sessionId,
-      taskId,
-      from: 'NEW_IDEA',
-      to: 'GRILLING',
-      triggeredBy: '/grill',
-    }),
-  );
-  writeTaskState(args.repoRoot, taskId, 'GRILLING');
-  emitAndProject(args.repoRoot, args.sessionId, buildGrillStartedEvent({ sessionId: args.sessionId, taskId }));
 
   const generator = args.generator ?? defaultQuestionGenerator();
   const priorAnswers: Array<{ category: string; answer: string }> = [];
@@ -132,9 +126,7 @@ export async function runGrill(args: RunGrillArgs): Promise<GrillResult> {
       reason: proceed ? 'questions answered' : 'user stopped early',
     },
     open_blockers: [],
-    ...(args.sourceDocs && args.sourceDocs.length > 0
-      ? { source_docs: args.sourceDocs }
-      : {}),
+    ...(args.sourceDocs && args.sourceDocs.length > 0 ? { source_docs: args.sourceDocs } : {}),
   };
   writeArtifact(args.repoRoot, taskId, 'grill', record);
 
@@ -147,18 +139,14 @@ export async function runGrill(args: RunGrillArgs): Promise<GrillResult> {
       decisionProceed: proceed,
     }),
   );
-  emitAndProject(
-    args.repoRoot,
-    args.sessionId,
-    buildTaskStateTransitionEvent({
-      sessionId: args.sessionId,
-      taskId,
-      from: 'GRILLING',
-      to: 'SHARED_UNDERSTANDING',
-      triggeredBy: '/grill (done)',
-    }),
-  );
-  writeTaskState(args.repoRoot, taskId, 'SHARED_UNDERSTANDING');
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId,
+    allowedFrom: ['GRILLING'],
+    to: 'SHARED_UNDERSTANDING',
+    triggeredBy: '/grill (done)',
+  });
 
   return { taskId, artifactPath: taskArtifactPath(args.repoRoot, taskId, 'grill') };
 }

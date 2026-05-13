@@ -2,14 +2,9 @@ import { emitAndProject } from '../../core/projector';
 import type { UiAdapter } from '../../pi/ui';
 import { makeEnvelope } from '../artifacts/envelope';
 import { readArtifactRaw as readArtifact, writeArtifact } from '../artifacts/io';
-import {
-  buildEvaluateCompletedEvent,
-  buildEvaluateStartedEvent,
-  buildTaskStateTransitionEvent,
-} from '../ccp-events';
+import { buildEvaluateCompletedEvent, buildEvaluateStartedEvent } from '../ccp-events';
 import { taskArtifactPath } from '../task-paths';
-import { requireTaskState, writeTaskState } from './shared/task-loader';
-import { emitPolicyDecision } from './shared/policy-decision-writer';
+import { transitionTaskLifecycle } from './shared/task-lifecycle';
 
 export type TaskOutcome = 'PASS' | 'PASS_WITH_DEGRADATION' | 'FAIL';
 export type ProcessQuality = 'high' | 'medium' | 'low';
@@ -28,38 +23,46 @@ export interface EvaluateResult {
 }
 
 export async function runEvaluate(args: EvaluateArgs): Promise<EvaluateResult> {
-  try {
-    requireTaskState(args.repoRoot, args.taskId, ['EVALUATING']);
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/evaluate',
-      actionRequested: 'enter EVALUATING', decision: 'allow', reasonCode: 'state_ok',
-      reason: 'state is EVALUATING', source: 'command_handler',
-    });
-  } catch (e) {
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/evaluate',
-      actionRequested: 'enter EVALUATING', decision: 'block', reasonCode: 'wrong_state',
-      reason: (e as Error).message, source: 'command_handler',
-    });
-    throw e;
-  }
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: ['EVALUATING'],
+    to: 'EVALUATING',
+    triggeredBy: '/evaluate',
+    policy: {
+      subjectName: '/evaluate',
+      actionRequested: 'enter EVALUATING',
+      allowReason: 'state is EVALUATING',
+    },
+  });
 
-  emitAndProject(args.repoRoot, args.sessionId, buildEvaluateStartedEvent({
-    sessionId: args.sessionId, taskId: args.taskId,
-  }));
+  emitAndProject(
+    args.repoRoot,
+    args.sessionId,
+    buildEvaluateStartedEvent({
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+    }),
+  );
 
   // Read artifacts to compute evaluation
   const grill = readArtifact(args.repoRoot, args.taskId, 'grill') as Record<string, unknown> | null;
-  const grillCriteria = Array.isArray((grill as any)?.success_criteria)
-    ? (grill as any).success_criteria as unknown[]
-    : [];
+  const successCriteria = grill?.success_criteria;
+  const grillCriteria = Array.isArray(successCriteria) ? successCriteria : [];
   const totalCriteria = grillCriteria.length;
 
-  const verification = readArtifact(args.repoRoot, args.taskId, 'verification') as Record<string, unknown> | null;
-  const verResult = (verification as any)?.result ?? 'unknown';
+  const verification = readArtifact(args.repoRoot, args.taskId, 'verification') as Record<
+    string,
+    unknown
+  > | null;
+  const verResult = typeof verification?.result === 'string' ? verification.result : 'unknown';
 
-  const review = readArtifact(args.repoRoot, args.taskId, 'review') as Record<string, unknown> | null;
-  const reviewStatus = (review as any)?.status ?? 'unknown';
+  const review = readArtifact(args.repoRoot, args.taskId, 'review') as Record<
+    string,
+    unknown
+  > | null;
+  const reviewStatus = typeof review?.status === 'string' ? review.status : 'unknown';
 
   // Compute criteria satisfaction rate from verification result
   let criteriaSatisfactionRate: number;
@@ -77,16 +80,18 @@ export async function runEvaluate(args: EvaluateArgs): Promise<EvaluateResult> {
     `[${args.taskId}] Evaluation: ${metCount}/${totalCriteria || '?'} criteria met (${Math.round(criteriaSatisfactionRate * 100)}%). Verification: ${verResult}. Review: ${reviewStatus}. Confirm?`,
   );
 
-  const outcomeChoice = await args.ui.select(
-    `[${args.taskId}] Confirm task outcome:`,
-    ['PASS', 'PASS_WITH_DEGRADATION', 'FAIL'],
-  );
+  const outcomeChoice = await args.ui.select(`[${args.taskId}] Confirm task outcome:`, [
+    'PASS',
+    'PASS_WITH_DEGRADATION',
+    'FAIL',
+  ]);
   const taskOutcome = outcomeChoice as TaskOutcome;
 
-  const qualityChoice = await args.ui.select(
-    `[${args.taskId}] Process quality?`,
-    ['high', 'medium', 'low'],
-  );
+  const qualityChoice = await args.ui.select(`[${args.taskId}] Process quality?`, [
+    'high',
+    'medium',
+    'low',
+  ]);
   const processQuality = qualityChoice as ProcessQuality;
 
   const notes = await args.ui.input(`[${args.taskId}] Evaluation notes (optional):`);
@@ -104,20 +109,26 @@ export async function runEvaluate(args: EvaluateArgs): Promise<EvaluateResult> {
     notes: notes || null,
   });
 
-  emitAndProject(args.repoRoot, args.sessionId, buildEvaluateCompletedEvent({
-    sessionId: args.sessionId,
-    taskId: args.taskId,
-    taskOutcome,
-    criteriaSatisfactionRate,
-  }));
+  emitAndProject(
+    args.repoRoot,
+    args.sessionId,
+    buildEvaluateCompletedEvent({
+      sessionId: args.sessionId,
+      taskId: args.taskId,
+      taskOutcome,
+      criteriaSatisfactionRate,
+    }),
+  );
 
   const nextState = taskOutcome !== 'FAIL' ? 'PERSISTING_KNOWLEDGE' : 'FAILED_RECOVERABLE';
-  emitAndProject(args.repoRoot, args.sessionId, buildTaskStateTransitionEvent({
-    sessionId: args.sessionId, taskId: args.taskId,
-    from: 'EVALUATING', to: nextState,
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: ['EVALUATING'],
+    to: nextState,
     triggeredBy: `/evaluate (${taskOutcome})`,
-  }));
-  writeTaskState(args.repoRoot, args.taskId, nextState);
+  });
 
   return {
     taskOutcome,

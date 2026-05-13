@@ -2,16 +2,15 @@ import { emitAndProject } from '../../core/projector';
 import type { UiAdapter } from '../../pi/ui';
 import { makeEnvelope } from '../artifacts/envelope';
 import { writeArtifact } from '../artifacts/io';
-import {
-  buildQuickTaskCompletedEvent,
-  buildQuickTaskStartedEvent,
-  buildTaskCreatedEvent,
-  buildTaskStateTransitionEvent,
-} from '../ccp-events';
+import { buildQuickTaskCompletedEvent, buildQuickTaskStartedEvent } from '../ccp-events';
 import { allocateNextTaskId } from '../task-id';
 import { taskArtifactPath } from '../task-paths';
 import { setCurrentTaskId } from './shared/current-task';
-import { writeTaskState } from './shared/task-loader';
+import {
+  abortTaskLifecycle,
+  createTaskLifecycle,
+  transitionTaskLifecycle,
+} from './shared/task-lifecycle';
 
 export interface QuickTaskArgs {
   repoRoot: string;
@@ -32,13 +31,13 @@ export async function runQuickTask(args: QuickTaskArgs): Promise<QuickTaskResult
   const taskId = allocateNextTaskId(args.repoRoot);
   setCurrentTaskId(args.repoRoot, taskId);
 
-  emitAndProject(args.repoRoot, args.sessionId, buildTaskCreatedEvent({
+  createTaskLifecycle({
+    repoRoot: args.repoRoot,
     sessionId: args.sessionId,
     taskId,
     goal: args.taskSummary,
     userType: 'developer',
-  }));
-  writeTaskState(args.repoRoot, taskId, 'NEW_IDEA', args.sessionId);
+  });
 
   // Escalation check before any edits
   const escalate = await args.ui.select(
@@ -47,15 +46,19 @@ export async function runQuickTask(args: QuickTaskArgs): Promise<QuickTaskResult
   );
 
   if (escalate.startsWith('yes')) {
-    emitAndProject(args.repoRoot, args.sessionId, buildTaskStateTransitionEvent({
+    transitionTaskLifecycle({
+      repoRoot: args.repoRoot,
       sessionId: args.sessionId,
       taskId,
-      from: 'NEW_IDEA',
+      allowedFrom: ['NEW_IDEA'],
       to: 'QUICK_TASKING',
       triggeredBy: '/quick-task (escalated)',
-    }));
-    writeTaskState(args.repoRoot, taskId, 'QUICK_TASKING');
-    emitAndProject(args.repoRoot, args.sessionId, buildQuickTaskStartedEvent({ sessionId: args.sessionId, taskId }));
+    });
+    emitAndProject(
+      args.repoRoot,
+      args.sessionId,
+      buildQuickTaskStartedEvent({ sessionId: args.sessionId, taskId }),
+    );
 
     const env = makeEnvelope({ taskId, artifactType: 'QuickTaskRecord' });
     writeArtifact(args.repoRoot, taskId, 'quick-task', {
@@ -68,14 +71,24 @@ export async function runQuickTask(args: QuickTaskArgs): Promise<QuickTaskResult
       escalation_reason: 'Scope exceeds quick-task bounds — use /grill to start full workflow',
     });
 
-    emitAndProject(args.repoRoot, args.sessionId, buildQuickTaskCompletedEvent({
-      sessionId: args.sessionId, taskId, status: 'ESCALATED_TO_FULL_WORKFLOW', filesChanged: 0,
-    }));
-    emitAndProject(args.repoRoot, args.sessionId, buildTaskStateTransitionEvent({
-      sessionId: args.sessionId, taskId, from: 'QUICK_TASKING', to: 'ABORTED',
+    emitAndProject(
+      args.repoRoot,
+      args.sessionId,
+      buildQuickTaskCompletedEvent({
+        sessionId: args.sessionId,
+        taskId,
+        status: 'ESCALATED_TO_FULL_WORKFLOW',
+        filesChanged: 0,
+      }),
+    );
+    abortTaskLifecycle({
+      repoRoot: args.repoRoot,
+      sessionId: args.sessionId,
+      taskId,
+      allowedFrom: ['QUICK_TASKING'],
       triggeredBy: '/quick-task (escalated → aborted)',
-    }));
-    writeTaskState(args.repoRoot, taskId, 'ABORTED');
+      reason: 'quick task escalated to full workflow',
+    });
 
     return {
       taskId,
@@ -84,29 +97,33 @@ export async function runQuickTask(args: QuickTaskArgs): Promise<QuickTaskResult
     };
   }
 
-  emitAndProject(args.repoRoot, args.sessionId, buildTaskStateTransitionEvent({
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
     sessionId: args.sessionId,
     taskId,
-    from: 'NEW_IDEA',
+    allowedFrom: ['NEW_IDEA'],
     to: 'QUICK_TASKING',
     triggeredBy: '/quick-task',
-  }));
-  writeTaskState(args.repoRoot, taskId, 'QUICK_TASKING');
-  emitAndProject(args.repoRoot, args.sessionId, buildQuickTaskStartedEvent({ sessionId: args.sessionId, taskId }));
+  });
+  emitAndProject(
+    args.repoRoot,
+    args.sessionId,
+    buildQuickTaskStartedEvent({ sessionId: args.sessionId, taskId }),
+  );
 
   const filesRaw = await args.ui.input(
     `[${taskId}] Which files were changed? (comma-separated paths)`,
   );
-  const filesChanged = filesRaw.split(',').map((s) => s.trim()).filter(Boolean);
+  const filesChanged = filesRaw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   const verificationCommand = await args.ui.input(
     `[${taskId}] Verification command (e.g. npm test, or press enter to skip):`,
   );
 
-  const statusChoice = await args.ui.select(
-    `[${taskId}] Outcome?`,
-    ['PASS_QUICK', 'FAIL'],
-  );
+  const statusChoice = await args.ui.select(`[${taskId}] Outcome?`, ['PASS_QUICK', 'FAIL']);
   const status = statusChoice as 'PASS_QUICK' | 'FAIL';
 
   const env = makeEnvelope({ taskId, artifactType: 'QuickTaskRecord' });
@@ -119,19 +136,26 @@ export async function runQuickTask(args: QuickTaskArgs): Promise<QuickTaskResult
     status,
   });
 
-  emitAndProject(args.repoRoot, args.sessionId, buildQuickTaskCompletedEvent({
-    sessionId: args.sessionId,
-    taskId,
-    status,
-    filesChanged: filesChanged.length,
-  }));
+  emitAndProject(
+    args.repoRoot,
+    args.sessionId,
+    buildQuickTaskCompletedEvent({
+      sessionId: args.sessionId,
+      taskId,
+      status,
+      filesChanged: filesChanged.length,
+    }),
+  );
 
   const nextState = status === 'PASS_QUICK' ? 'AWAITING_HUMAN_REVIEW' : 'FAILED_RECOVERABLE';
-  emitAndProject(args.repoRoot, args.sessionId, buildTaskStateTransitionEvent({
-    sessionId: args.sessionId, taskId, from: 'QUICK_TASKING', to: nextState,
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId,
+    allowedFrom: ['QUICK_TASKING'],
+    to: nextState,
     triggeredBy: `/quick-task (${status})`,
-  }));
-  writeTaskState(args.repoRoot, taskId, nextState);
+  });
 
   return {
     taskId,

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import type { CommandRunner } from '../../../../../src/ccp/commands/shared/command-runner';
 import {
   type StepExecutor,
   makeMockStepExecutor,
@@ -51,6 +52,40 @@ describe('makeMockStepExecutor', () => {
 });
 
 describe('makeShellStepExecutor', () => {
+  it('uses the supplied command runner adapter', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'aos-shell-'));
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async runCommand(command) {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          stdout: 'from adapter',
+          stderr: '',
+          durationMs: 3,
+        };
+      },
+    };
+    const exec = makeShellStepExecutor({ cwd, runner });
+
+    const r = await exec.executeStep({
+      stepId: 'S-1',
+      step: {
+        commands: [{ command: 'echo hello', approval_tier: 1 }],
+        expected_files: [],
+      },
+    });
+
+    expect(calls).toEqual(['echo hello']);
+    expect(r.command_outputs[0]).toMatchObject({
+      command: 'echo hello',
+      exit_code: 0,
+      stdout: 'from adapter',
+      duration_ms: 3,
+    });
+  });
+
   it('runs a real command and returns completed', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'aos-shell-'));
     const exec = makeShellStepExecutor({ cwd });

@@ -10,21 +10,15 @@ import {
   buildKnowledgeCaptureApprovedEvent,
   buildKnowledgeCaptureProposedEvent,
   buildKnowledgeCaptureRejectedEvent,
-  buildTaskCompletedEvent,
-  buildTaskStateTransitionEvent,
 } from '../ccp-events';
 import {
   type CaptureProposal,
   type CaptureProposer,
   defaultCaptureProposer,
 } from './shared/capture-proposer';
-import {
-  approveCandidate,
-  rejectCandidate,
-  stageCandidates,
-} from './shared/memory-staging';
-import { requireTaskState, writeTaskState } from './shared/task-loader';
+import { approveCandidate, rejectCandidate, stageCandidates } from './shared/memory-staging';
 import { emitPolicyDecision } from './shared/policy-decision-writer';
+import { completeTaskLifecycle, transitionTaskLifecycle } from './shared/task-lifecycle';
 
 export interface RememberArgs {
   repoRoot: string;
@@ -38,38 +32,19 @@ export interface RememberArgs {
 }
 
 export async function runRemember(args: RememberArgs): Promise<{ kept: number; dropped: number }> {
-  const allowedPre = ['AWAITING_HUMAN_REVIEW', 'PERSISTING_KNOWLEDGE'];
-  let currentState: string;
-  try {
-    currentState = requireTaskState(args.repoRoot, args.taskId, allowedPre);
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/remember',
-      actionRequested: 'enter PERSISTING_KNOWLEDGE', decision: 'allow', reasonCode: 'state_ok',
-      reason: `state is ${currentState}`, source: 'command_handler',
-    });
-  } catch (e) {
-    emitPolicyDecision(args.repoRoot, args.sessionId, {
-      taskId: args.taskId, subjectType: 'phase_transition', subjectName: '/remember',
-      actionRequested: 'enter PERSISTING_KNOWLEDGE', decision: 'block', reasonCode: 'wrong_state',
-      reason: (e as Error).message, source: 'command_handler',
-    });
-    throw e;
-  }
-
-  if (currentState !== 'PERSISTING_KNOWLEDGE') {
-    emitAndProject(
-      args.repoRoot,
-      args.sessionId,
-      buildTaskStateTransitionEvent({
-        sessionId: args.sessionId,
-        taskId: args.taskId,
-        from: currentState,
-        to: 'PERSISTING_KNOWLEDGE',
-        triggeredBy: '/remember',
-      }),
-    );
-    writeTaskState(args.repoRoot, args.taskId, 'PERSISTING_KNOWLEDGE');
-  }
+  transitionTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: ['AWAITING_HUMAN_REVIEW', 'PERSISTING_KNOWLEDGE'],
+    to: 'PERSISTING_KNOWLEDGE',
+    triggeredBy: '/remember',
+    policy: {
+      subjectName: '/remember',
+      actionRequested: 'enter PERSISTING_KNOWLEDGE',
+      allowReason: 'state is AWAITING_HUMAN_REVIEW or PERSISTING_KNOWLEDGE',
+    },
+  });
 
   const proposer = args.proposer ?? defaultCaptureProposer();
   const eventsLog = sessionEventsPath(args.repoRoot, args.sessionId);
@@ -132,10 +107,16 @@ export async function runRemember(args: RememberArgs): Promise<{ kept: number; d
       });
       approveCandidate(args.repoRoot, args.taskId, candidate.id, result.id ?? undefined);
       emitPolicyDecision(args.repoRoot, args.sessionId, {
-        taskId: args.taskId, subjectType: 'memory_write', subjectName: candidate.id,
-        actionRequested: 'write to brain', decision: 'approved', reasonCode: 'human_approved',
-        reason: 'user confirmed memory capture', approvedBy: 'human',
-        memoryCandidateRefs: [candidate.id], source: 'memory_staging',
+        taskId: args.taskId,
+        subjectType: 'memory_write',
+        subjectName: candidate.id,
+        actionRequested: 'write to brain',
+        decision: 'approved',
+        reasonCode: 'human_approved',
+        reason: 'user confirmed memory capture',
+        approvedBy: 'human',
+        memoryCandidateRefs: [candidate.id],
+        source: 'memory_staging',
       });
       emitAndProject(
         args.repoRoot,
@@ -161,10 +142,16 @@ export async function runRemember(args: RememberArgs): Promise<{ kept: number; d
     } else {
       rejectCandidate(args.repoRoot, args.taskId, candidate.id);
       emitPolicyDecision(args.repoRoot, args.sessionId, {
-        taskId: args.taskId, subjectType: 'memory_write', subjectName: candidate.id,
-        actionRequested: 'write to brain', decision: 'rejected', reasonCode: 'human_rejected',
-        reason: 'user skipped memory capture', approvedBy: 'none',
-        memoryCandidateRefs: [candidate.id], source: 'memory_staging',
+        taskId: args.taskId,
+        subjectType: 'memory_write',
+        subjectName: candidate.id,
+        actionRequested: 'write to brain',
+        decision: 'rejected',
+        reasonCode: 'human_rejected',
+        reason: 'user skipped memory capture',
+        approvedBy: 'none',
+        memoryCandidateRefs: [candidate.id],
+        source: 'memory_staging',
       });
       emitAndProject(
         args.repoRoot,
@@ -194,23 +181,13 @@ export async function runRemember(args: RememberArgs): Promise<{ kept: number; d
     items,
   });
 
-  emitAndProject(
-    args.repoRoot,
-    args.sessionId,
-    buildTaskStateTransitionEvent({
-      sessionId: args.sessionId,
-      taskId: args.taskId,
-      from: 'PERSISTING_KNOWLEDGE',
-      to: 'COMPLETED',
-      triggeredBy: '/remember (done)',
-    }),
-  );
-  writeTaskState(args.repoRoot, args.taskId, 'COMPLETED');
-  emitAndProject(
-    args.repoRoot,
-    args.sessionId,
-    buildTaskCompletedEvent({ sessionId: args.sessionId, taskId: args.taskId }),
-  );
+  completeTaskLifecycle({
+    repoRoot: args.repoRoot,
+    sessionId: args.sessionId,
+    taskId: args.taskId,
+    allowedFrom: ['PERSISTING_KNOWLEDGE'],
+    triggeredBy: '/remember (done)',
+  });
 
   if (kept > 0) {
     const jsonlPath = join(args.repoRoot, 'data_store', 'knowledge.jsonl');

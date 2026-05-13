@@ -6,62 +6,60 @@
 // at runtime — the shape is verified against the live installed Pi.
 
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { existsSync, readFileSync } from 'node:fs';
 
-const execFileAsync = promisify(execFile);
 import { basename, join } from 'node:path';
 import YAML from 'yaml';
+import { BrainClient } from '../ccp/brain/client';
 import { runDiagnose } from '../ccp/commands/diagnose';
+import { renderDoctorReport, runDoctorCommand } from '../ccp/commands/doctor';
 import { runEvaluate } from '../ccp/commands/evaluate';
 import { runGrill } from '../ccp/commands/grill';
-import { renderDoctorReport, runDoctorCommand } from '../ccp/commands/doctor';
 import { runInit } from '../ccp/commands/init';
 import { runPlan } from '../ccp/commands/plan';
 import { runQuickTask } from '../ccp/commands/quick-task';
 import { runRemember } from '../ccp/commands/remember';
 import { runReview } from '../ccp/commands/review';
 import { runRun } from '../ccp/commands/run';
-import { runStatus } from '../ccp/commands/status';
-import { runTrace } from '../ccp/commands/trace';
-import { runVerify } from '../ccp/commands/verify';
-import { BrainClient } from '../ccp/brain/client';
+import { makeShellCommandRunner } from '../ccp/commands/shared/command-runner';
 import { getCurrentTaskId } from '../ccp/commands/shared/current-task';
-import { loadTaskSessionId, loadTaskState } from '../ccp/commands/shared/task-loader';
-import {
-  buildHeartbeatEvent,
-  buildValidatorStartedEvent,
-  buildValidatorPassedEvent,
-  buildValidatorFailedEvent,
-  buildWorkflowPackLoadedEvent,
-  buildWorkflowPackLoadFailedEvent,
-} from '../core/events';
-import { emitAndProject } from '../core/projector';
-import { loadWorkflowPacks, type GrillConfig, type PlanConfig } from '../core/workflow-pack-loader';
-import { PhaseRegistry } from '../core/phase-registry';
-import { runValidatorsForPhase } from '../core/validator-runner';
-import { type ArtifactType, taskArtifactPath, taskDir } from '../ccp/task-paths';
-import { defaultQuestionGenerator } from '../ccp/commands/shared/question-generator';
-import { defaultPlanDrafter } from '../ccp/commands/shared/plan-drafter';
-import { PackPlanDrafter } from '../core/pack-plan-drafter';
-import { detectDocs, type DetectedDoc } from '../core/doc-detector';
-import { PackQuestionGenerator } from '../core/pack-question-generator';
-import { makeShellStepExecutor } from '../ccp/commands/shared/step-executor';
+import { createCheckpoint, restoreCheckpoint } from '../ccp/commands/shared/git-checkpoint';
 import {
   approveCandidate,
   listPendingCandidates,
   rejectCandidate,
 } from '../ccp/commands/shared/memory-staging';
-import { createCheckpoint, restoreCheckpoint } from '../ccp/commands/shared/git-checkpoint';
+import { defaultPlanDrafter } from '../ccp/commands/shared/plan-drafter';
 import { emitPolicyDecision } from '../ccp/commands/shared/policy-decision-writer';
+import { defaultQuestionGenerator } from '../ccp/commands/shared/question-generator';
+import { makeShellStepExecutor } from '../ccp/commands/shared/step-executor';
+import { loadTaskSessionId, loadTaskState } from '../ccp/commands/shared/task-loader';
+import { runStatus } from '../ccp/commands/status';
+import { runTrace } from '../ccp/commands/trace';
+import { runVerify } from '../ccp/commands/verify';
 import {
   type SessionApprovalCache,
   decideToolCall,
   recordTier2Approval,
 } from '../ccp/policy/decision-flow';
 import { ToolRegistry } from '../ccp/policy/tool-registry';
+import { type ArtifactType, taskArtifactPath, taskDir } from '../ccp/task-paths';
+import { type DetectedDoc, detectDocs } from '../core/doc-detector';
+import {
+  buildHeartbeatEvent,
+  buildValidatorFailedEvent,
+  buildValidatorPassedEvent,
+  buildValidatorStartedEvent,
+  buildWorkflowPackLoadFailedEvent,
+  buildWorkflowPackLoadedEvent,
+} from '../core/events';
 import type { ProjectConfig } from '../core/manifest';
+import { PackPlanDrafter } from '../core/pack-plan-drafter';
+import { PackQuestionGenerator } from '../core/pack-question-generator';
+import { PhaseRegistry } from '../core/phase-registry';
+import { emitAndProject } from '../core/projector';
+import { runValidatorsForPhase } from '../core/validator-runner';
+import { type GrillConfig, type PlanConfig, loadWorkflowPacks } from '../core/workflow-pack-loader';
 import type { UiAdapter } from './ui';
 
 /**
@@ -81,12 +79,30 @@ function buildPiRegistry(): ToolRegistry {
     idempotency_key_support: false,
   };
   for (const id of ['read', 'grep', 'find', 'ls'] as const) {
-    r.register({ ...base, tool_id: id, capability_type: 'READ_LOCAL', read_or_write: 'read', approval_tier: 1 });
+    r.register({
+      ...base,
+      tool_id: id,
+      capability_type: 'READ_LOCAL',
+      read_or_write: 'read',
+      approval_tier: 1,
+    });
   }
   for (const id of ['edit', 'write'] as const) {
-    r.register({ ...base, tool_id: id, capability_type: 'WRITE_LOCAL', read_or_write: 'write', approval_tier: 2 });
+    r.register({
+      ...base,
+      tool_id: id,
+      capability_type: 'WRITE_LOCAL',
+      read_or_write: 'write',
+      approval_tier: 2,
+    });
   }
-  r.register({ ...base, tool_id: 'bash', capability_type: 'EXECUTE_LOCAL', read_or_write: 'write', approval_tier: 3 });
+  r.register({
+    ...base,
+    tool_id: 'bash',
+    capability_type: 'EXECUTE_LOCAL',
+    read_or_write: 'write',
+    approval_tier: 3,
+  });
   return r;
 }
 
@@ -127,12 +143,14 @@ function loadPolicyConfig(cwd: string): ProjectConfig {
 
 /** Derive a valid project-id from a directory name. */
 function dirToProjectId(dir: string): string {
-  return basename(dir)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')  // non-alphanumeric runs → dash
-    .replace(/^[^a-z]+/, '')       // strip leading non-letter chars
-    .replace(/-+$/, '')            // strip trailing dashes
-    .slice(0, 63) || 'my-project';
+  return (
+    basename(dir)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-') // non-alphanumeric runs → dash
+      .replace(/^[^a-z]+/, '') // strip leading non-letter chars
+      .replace(/-+$/, '') // strip trailing dashes
+      .slice(0, 63) || 'my-project'
+  );
 }
 
 /**
@@ -167,7 +185,9 @@ export default async function extension(pi: any): Promise<void> {
     try {
       const state = loadTaskState(cwd, taskId) ?? 'UNKNOWN';
       ctx.ui.setStatus('agent-os', `${taskId} | ${state}`);
-    } catch { /* best-effort */ }
+    } catch {
+      /* best-effort */
+    }
   }
 
   // Called at the top of every command handler. No-op after first successful load.
@@ -200,14 +220,20 @@ export default async function extension(pi: any): Promise<void> {
               setTimeout(() => ctx.ui.setStatus('agent-os', undefined), 5000);
             }
             try {
-              emitAndProject(cwd, sessionId, buildWorkflowPackLoadedEvent({
+              emitAndProject(
+                cwd,
                 sessionId,
-                packId: result.manifest.workflow_pack_id,
-                packVersion: result.manifest.version,
-                packDir: result.packDir,
-                phaseCount: result.manifest.phases.length,
-              }));
-            } catch { /* event write best-effort */ }
+                buildWorkflowPackLoadedEvent({
+                  sessionId,
+                  packId: result.manifest.workflow_pack_id,
+                  packVersion: result.manifest.version,
+                  packDir: result.packDir,
+                  phaseCount: result.manifest.phases.length,
+                }),
+              );
+            } catch {
+              /* event write best-effort */
+            }
           } else {
             // Additional valid packs are ignored in v1.x.
             if (ctx.hasUI) {
@@ -222,15 +248,23 @@ export default async function extension(pi: any): Promise<void> {
             ctx.ui.notify(`Workflow pack load failed: ${result.error}`, 'error');
           }
           try {
-            emitAndProject(cwd, sessionId, buildWorkflowPackLoadFailedEvent({
+            emitAndProject(
+              cwd,
               sessionId,
-              packDir: result.packDir,
-              error: result.error,
-            }));
-          } catch { /* event write best-effort */ }
+              buildWorkflowPackLoadFailedEvent({
+                sessionId,
+                packDir: result.packDir,
+                error: result.error,
+              }),
+            );
+          } catch {
+            /* event write best-effort */
+          }
         }
       }
-    } catch { /* never crash a command over pack loading */ }
+    } catch {
+      /* never crash a command over pack loading */
+    }
   }
 
   // Run advisory validators for a phase after its artifact is written.
@@ -264,30 +298,62 @@ export default async function extension(pi: any): Promise<void> {
 
     for (const { id, mode, result } of results) {
       try {
-        emitAndProject(cwd, sessionId, buildValidatorStartedEvent({
-          sessionId, packId: _phaseRegistry.packId, validatorId: id, phaseId, mode,
-        }));
-      } catch { /* best-effort */ }
+        emitAndProject(
+          cwd,
+          sessionId,
+          buildValidatorStartedEvent({
+            sessionId,
+            packId: _phaseRegistry.packId,
+            validatorId: id,
+            phaseId,
+            mode,
+          }),
+        );
+      } catch {
+        /* best-effort */
+      }
 
       if (result.ok) {
         try {
-          emitAndProject(cwd, sessionId, buildValidatorPassedEvent({
-            sessionId, packId: _phaseRegistry.packId, validatorId: id, phaseId,
-          }));
-        } catch { /* best-effort */ }
+          emitAndProject(
+            cwd,
+            sessionId,
+            buildValidatorPassedEvent({
+              sessionId,
+              packId: _phaseRegistry.packId,
+              validatorId: id,
+              phaseId,
+            }),
+          );
+        } catch {
+          /* best-effort */
+        }
         if (ctx.hasUI) {
           ctx.ui.notify(`[${id}] passed`, 'info');
         }
       } else {
         try {
-          emitAndProject(cwd, sessionId, buildValidatorFailedEvent({
-            sessionId, packId: _phaseRegistry.packId, validatorId: id, phaseId, mode,
-            findings: result.findings.map((f) => f.message),
-          }));
-        } catch { /* best-effort */ }
+          emitAndProject(
+            cwd,
+            sessionId,
+            buildValidatorFailedEvent({
+              sessionId,
+              packId: _phaseRegistry.packId,
+              validatorId: id,
+              phaseId,
+              mode,
+              findings: result.findings.map((f) => f.message),
+            }),
+          );
+        } catch {
+          /* best-effort */
+        }
         const summary = result.findings.map((f) => f.message).join('; ');
         if (ctx.hasUI) {
-          ctx.ui.notify(`[${id}] ${mode === 'advisory' ? 'advisory' : 'FAILED'}: ${summary}`, mode === 'advisory' ? 'info' : 'error');
+          ctx.ui.notify(
+            `[${id}] ${mode === 'advisory' ? 'advisory' : 'FAILED'}: ${summary}`,
+            mode === 'advisory' ? 'info' : 'error',
+          );
         }
       }
     }
@@ -319,9 +385,7 @@ export default async function extension(pi: any): Promise<void> {
       }
 
       // Inject project ID from folder name when none was provided.
-      const hasPositional = safeArgs
-        .split(/\s+/)
-        .some((t) => t && !t.startsWith('--'));
+      const hasPositional = safeArgs.split(/\s+/).some((t) => t && !t.startsWith('--'));
       if (!hasPositional) {
         const derivedId = dirToProjectId(ctx.cwd);
         safeArgs = `${derivedId} ${safeArgs}`.trim();
@@ -380,7 +444,9 @@ export default async function extension(pi: any): Promise<void> {
     handler: async (args: string, ctx: any) => {
       ensurePacksLoaded(ctx.cwd, ctx);
       const taskIdArg = args.match(/T-\d{3}/)?.[0];
-      const sessionIdArg = args.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
+      const sessionIdArg = args.match(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+      )?.[0];
       const status = await runStatus({
         repoRoot: ctx.cwd,
         taskId: taskIdArg ?? undefined,
@@ -392,8 +458,11 @@ export default async function extension(pi: any): Promise<void> {
         let memLine = '';
         try {
           const pending = listPendingCandidates(ctx.cwd, taskId);
-          if (pending.length > 0) memLine = `\n${pending.length} memory candidate(s) pending — run /memory ${taskId} to resume`;
-        } catch { /* best-effort */ }
+          if (pending.length > 0)
+            memLine = `\n${pending.length} memory candidate(s) pending — run /memory ${taskId} to resume`;
+        } catch {
+          /* best-effort */
+        }
         ctx.ui.notify(
           `${taskId} · ${status.current_state}\nnext: ${status.next_action}${memLine}`,
           'info',
@@ -409,9 +478,11 @@ export default async function extension(pi: any): Promise<void> {
   pi.registerCommand('flight', {
     description: 'Show Black Box flight recorder timeline. Usage: /flight [session-id] [--tail N]',
     handler: async (args: string, ctx: any) => {
-      const sessionIdArg = args.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
+      const sessionIdArg = args.match(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+      )?.[0];
       const tailMatch = args.match(/--tail\s+(\d+)/);
-      const tail = tailMatch?.[1] !== undefined ? parseInt(tailMatch[1], 10) : undefined;
+      const tail = tailMatch?.[1] !== undefined ? Number.parseInt(tailMatch[1], 10) : undefined;
       try {
         await runTrace({
           repoRoot: ctx.cwd,
@@ -440,7 +511,10 @@ export default async function extension(pi: any): Promise<void> {
         docs = detectDocs(cwd);
       } catch (e) {
         if (ctx.hasUI) {
-          ctx.ui.notify(`Doc detection failed: ${(e as Error).message} — using default questions`, 'info');
+          ctx.ui.notify(
+            `Doc detection failed: ${(e as Error).message} — using default questions`,
+            'info',
+          );
         }
       }
       const maxQ = _grillConfig.max_questions ?? 8;
@@ -454,7 +528,10 @@ export default async function extension(pi: any): Promise<void> {
   // Shared by /plan, /flow, and /continue handlers.
   function buildPlanDrafter(): ReturnType<typeof defaultPlanDrafter> {
     if (!_phaseRegistry || !_planConfig) return defaultPlanDrafter();
-    if (_planConfig.verification_profile === 'detected' || _planConfig.verification_profile === 'none') {
+    if (
+      _planConfig.verification_profile === 'detected' ||
+      _planConfig.verification_profile === 'none'
+    ) {
       return new PackPlanDrafter(_planConfig);
     }
     return defaultPlanDrafter();
@@ -518,7 +595,10 @@ export default async function extension(pi: any): Promise<void> {
             'info',
           );
         } else {
-          ctx.ui.notify(`Plan rejected. Edit .agent-os/tasks/${taskId}/plan.yaml and run /plan again.`, 'info');
+          ctx.ui.notify(
+            `Plan rejected. Edit .agent-os/tasks/${taskId}/plan.yaml and run /plan again.`,
+            'info',
+          );
         }
         await runPackValidators(ctx.cwd, planSessionId, 'write-plan', 'plan', taskId, ctx);
       } catch (e) {
@@ -545,15 +625,27 @@ export default async function extension(pi: any): Promise<void> {
         if (ckpt.noGit) {
           ctx.ui.notify('Warning: not a git repo — no checkpoint created. Proceeding.', 'info');
           emitPolicyDecision(ctx.cwd, runSid, {
-            taskId, subjectType: 'sandbox', subjectName: 'git-checkpoint',
-            actionRequested: 'stash dirty files', decision: 'block', reasonCode: 'no_git',
-            reason: 'not a git repo — checkpoint skipped', source: 'checkpoint',
+            taskId,
+            subjectType: 'sandbox',
+            subjectName: 'git-checkpoint',
+            actionRequested: 'stash dirty files',
+            decision: 'block',
+            reasonCode: 'no_git',
+            reason: 'not a git repo — checkpoint skipped',
+            source: 'checkpoint',
           });
         } else if (ckpt.created) {
-          ctx.ui.notify(`Checkpoint: stashed ${ckpt.dirtyFiles.length} file(s). Will restore on failure.`, 'info');
+          ctx.ui.notify(
+            `Checkpoint: stashed ${ckpt.dirtyFiles.length} file(s). Will restore on failure.`,
+            'info',
+          );
           emitPolicyDecision(ctx.cwd, runSid, {
-            taskId, subjectType: 'sandbox', subjectName: 'git-checkpoint',
-            actionRequested: 'stash dirty files', decision: 'allow', reasonCode: 'checkpoint_created',
+            taskId,
+            subjectType: 'sandbox',
+            subjectName: 'git-checkpoint',
+            actionRequested: 'stash dirty files',
+            decision: 'allow',
+            reasonCode: 'checkpoint_created',
             reason: `stashed ${ckpt.dirtyFiles.length} file(s) (sha: ${ckpt.sha ?? 'n/a'})`,
             source: 'checkpoint',
           });
@@ -572,9 +664,14 @@ export default async function extension(pi: any): Promise<void> {
           if (restore.restored) {
             ctx.ui.notify('Checkpoint restored — pre-run changes are back.', 'info');
             emitPolicyDecision(ctx.cwd, runSid, {
-              taskId, subjectType: 'sandbox', subjectName: 'git-checkpoint',
-              actionRequested: 'restore stash', decision: 'allow', reasonCode: 'run_failed_restore',
-              reason: `run outcome=${outcome}; pre-run state restored`, source: 'checkpoint',
+              taskId,
+              subjectType: 'sandbox',
+              subjectName: 'git-checkpoint',
+              actionRequested: 'restore stash',
+              decision: 'allow',
+              reasonCode: 'run_failed_restore',
+              reason: `run outcome=${outcome}; pre-run state restored`,
+              source: 'checkpoint',
             });
           }
         }
@@ -588,7 +685,11 @@ export default async function extension(pi: any): Promise<void> {
         ctx.ui.setStatus('agent-os', undefined);
         // Attempt restore on exception
         if (typeof taskId === 'string') {
-          try { await restoreCheckpoint(ctx.cwd); } catch { /* best-effort */ }
+          try {
+            await restoreCheckpoint(ctx.cwd);
+          } catch {
+            /* best-effort */
+          }
         }
         ctx.ui.notify(`/run failed: ${(e as Error).message}`, 'error');
       }
@@ -612,23 +713,7 @@ export default async function extension(pi: any): Promise<void> {
           repoRoot: ctx.cwd,
           sessionId: verifySessionId,
           taskId,
-          runner: {
-            async runCommand(cmd: string) {
-              try {
-                const { stdout, stderr } = await execFileAsync('sh', ['-c', cmd], {
-                  cwd: ctx.cwd,
-                  timeout: 60_000,
-                });
-                return { exitCode: 0, stdout, stderr };
-              } catch (err: any) {
-                return {
-                  exitCode: err.code ?? 1,
-                  stdout: err.stdout ?? '',
-                  stderr: err.stderr ?? String(err.message),
-                };
-              }
-            },
-          },
+          runner: makeShellCommandRunner({ cwd: ctx.cwd }),
         });
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(
@@ -652,7 +737,10 @@ export default async function extension(pi: any): Promise<void> {
       ensurePacksLoaded(ctx.cwd, ctx);
       const bugSummary = args.trim();
       if (!bugSummary) {
-        ctx.ui.notify('/diagnose requires a bug summary. Example: /diagnose login fails on Safari', 'error');
+        ctx.ui.notify(
+          '/diagnose requires a bug summary. Example: /diagnose login fails on Safari',
+          'error',
+        );
         return;
       }
       ctx.ui.setStatus('agent-os', 'diagnosing…');
@@ -684,7 +772,10 @@ export default async function extension(pi: any): Promise<void> {
       ensurePacksLoaded(ctx.cwd, ctx);
       const taskSummary = args.trim();
       if (!taskSummary) {
-        ctx.ui.notify('/quick-task requires a summary. Example: /quick-task fix typo in README', 'error');
+        ctx.ui.notify(
+          '/quick-task requires a summary. Example: /quick-task fix typo in README',
+          'error',
+        );
         return;
       }
       ctx.ui.setStatus('agent-os', 'quick-task…');
@@ -696,11 +787,12 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
         });
         ctx.ui.setStatus('agent-os', undefined);
-        const msg = status === 'ESCALATED_TO_FULL_WORKFLOW'
-          ? `${taskId} escalated — use /grill to start full workflow.`
-          : status === 'PASS_QUICK'
-          ? `${taskId} done. Run /review to confirm.`
-          : `${taskId} failed — fix and run /quick-task again.`;
+        const msg =
+          status === 'ESCALATED_TO_FULL_WORKFLOW'
+            ? `${taskId} escalated — use /grill to start full workflow.`
+            : status === 'PASS_QUICK'
+              ? `${taskId} done. Run /review to confirm.`
+              : `${taskId} failed — fix and run /quick-task again.`;
         ctx.ui.notify(msg, status === 'FAIL' ? 'error' : 'info');
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
@@ -817,7 +909,10 @@ export default async function extension(pi: any): Promise<void> {
     handler: async (args: string, ctx: any) => {
       const goal = args.trim();
       if (!goal) {
-        ctx.ui.notify('/flow requires a goal. Example: /flow add pagination to users list', 'error');
+        ctx.ui.notify(
+          '/flow requires a goal. Example: /flow add pagination to users list',
+          'error',
+        );
         return;
       }
       const ui = makePiUiAdapter(ctx.ui);
@@ -844,7 +939,10 @@ export default async function extension(pi: any): Promise<void> {
       }
       refreshStatusBar(ctx.cwd, taskId, ctx);
       const proceedWithPlan = await ui.confirm(`${taskId}: grill done. Proceed with /plan?`);
-      if (!proceedWithPlan) { ctx.ui.notify('/flow paused after grill. Run /plan when ready.', 'info'); return; }
+      if (!proceedWithPlan) {
+        ctx.ui.notify('/flow paused after grill. Run /plan when ready.', 'info');
+        return;
+      }
 
       // ── plan ──
       ctx.ui.setStatus('agent-os', 'flow: planning…');
@@ -864,15 +962,27 @@ export default async function extension(pi: any): Promise<void> {
         return;
       }
       refreshStatusBar(ctx.cwd, taskId, ctx);
-      if (planOutcome !== 'approved') { ctx.ui.notify('/flow paused — plan not approved. Refine and run /plan, then /flow resume.', 'info'); return; }
+      if (planOutcome !== 'approved') {
+        ctx.ui.notify(
+          '/flow paused — plan not approved. Refine and run /plan, then /flow resume.',
+          'info',
+        );
+        return;
+      }
       const proceedWithRun = await ui.confirm(`${taskId}: plan approved. Proceed with /run?`);
-      if (!proceedWithRun) { ctx.ui.notify('/flow paused after plan. Run /run when ready.', 'info'); return; }
+      if (!proceedWithRun) {
+        ctx.ui.notify('/flow paused after plan. Run /run when ready.', 'info');
+        return;
+      }
 
       // ── run ──
       ctx.ui.setStatus('agent-os', 'flow: running…');
       const flowCkpt = await createCheckpoint(ctx.cwd, `agent-os-checkpoint: ${taskId}`);
       if (!flowCkpt.noGit && flowCkpt.created) {
-        ctx.ui.notify(`Checkpoint: stashed ${flowCkpt.dirtyFiles.length} file(s) before run.`, 'info');
+        ctx.ui.notify(
+          `Checkpoint: stashed ${flowCkpt.dirtyFiles.length} file(s) before run.`,
+          'info',
+        );
       }
       let runOutcome: string;
       try {
@@ -884,7 +994,13 @@ export default async function extension(pi: any): Promise<void> {
         }));
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
-        if (flowCkpt.created) { try { await restoreCheckpoint(ctx.cwd); } catch { /* best-effort */ } }
+        if (flowCkpt.created) {
+          try {
+            await restoreCheckpoint(ctx.cwd);
+          } catch {
+            /* best-effort */
+          }
+        }
         ctx.ui.notify(`/flow stopped at run: ${(e as Error).message}`, 'error');
         return;
       }
@@ -894,7 +1010,10 @@ export default async function extension(pi: any): Promise<void> {
           const r = await restoreCheckpoint(ctx.cwd);
           if (r.restored) ctx.ui.notify('Checkpoint restored — pre-run changes are back.', 'info');
         }
-        ctx.ui.notify(`/flow stopped — /run outcome: ${runOutcome}. Fix and /run --resume.`, 'error');
+        ctx.ui.notify(
+          `/flow stopped — /run outcome: ${runOutcome}. Fix and /run --resume.`,
+          'error',
+        );
         return;
       }
 
@@ -907,16 +1026,7 @@ export default async function extension(pi: any): Promise<void> {
           repoRoot: ctx.cwd,
           sessionId: verifySessionId,
           taskId,
-          runner: {
-            async runCommand(cmd: string) {
-              try {
-                const { stdout, stderr } = await execFileAsync('sh', ['-c', cmd], { cwd: ctx.cwd, timeout: 60_000 });
-                return { exitCode: 0, stdout, stderr };
-              } catch (err: any) {
-                return { exitCode: err.code ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? String(err.message) };
-              }
-            },
-          },
+          runner: makeShellCommandRunner({ cwd: ctx.cwd }),
         }));
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
@@ -924,7 +1034,13 @@ export default async function extension(pi: any): Promise<void> {
         return;
       }
       refreshStatusBar(ctx.cwd, taskId, ctx);
-      if (verifyResult !== 'pass') { ctx.ui.notify(`/flow stopped — verification: ${verifyResult}. Fix and run /verify.`, 'error'); return; }
+      if (verifyResult !== 'pass') {
+        ctx.ui.notify(
+          `/flow stopped — verification: ${verifyResult}. Fix and run /verify.`,
+          'error',
+        );
+        return;
+      }
 
       // ── review ──
       ctx.ui.setStatus('agent-os', 'flow: reviewing…');
@@ -942,7 +1058,13 @@ export default async function extension(pi: any): Promise<void> {
         return;
       }
       refreshStatusBar(ctx.cwd, taskId, ctx);
-      if (reviewStatus === 'FAIL' || reviewStatus === 'BLOCKED') { ctx.ui.notify(`/flow stopped — review: ${reviewStatus}. Fix and run /verify again.`, 'error'); return; }
+      if (reviewStatus === 'FAIL' || reviewStatus === 'BLOCKED') {
+        ctx.ui.notify(
+          `/flow stopped — review: ${reviewStatus}. Fix and run /verify again.`,
+          'error',
+        );
+        return;
+      }
 
       // ── evaluate ──
       ctx.ui.setStatus('agent-os', 'flow: evaluating…');
@@ -965,7 +1087,7 @@ export default async function extension(pi: any): Promise<void> {
       ctx.ui.notify(
         taskOutcome !== 'FAIL'
           ? `Flow complete. ${taskId} evaluated: ${taskOutcome}. Run /remember to save learnings.`
-          : `Flow complete with FAIL evaluation. Review and decide whether to retry.`,
+          : 'Flow complete with FAIL evaluation. Review and decide whether to retry.',
         taskOutcome === 'FAIL' ? 'error' : 'info',
       );
     },
@@ -1012,11 +1134,15 @@ export default async function extension(pi: any): Promise<void> {
             });
             approveCandidate(ctx.cwd, taskId, candidate.id, result.id ?? undefined);
             emitPolicyDecision(ctx.cwd, sid, {
-              taskId, subjectType: 'memory_write', subjectName: candidate.id,
+              taskId,
+              subjectType: 'memory_write',
+              subjectName: candidate.id,
               actionRequested: 'write to brain (orphan recovery)',
-              decision: 'approved', reasonCode: 'human_approved_recovery',
+              decision: 'approved',
+              reasonCode: 'human_approved_recovery',
               reason: 'user approved orphaned memory candidate',
-              approvedBy: 'human', memoryCandidateRefs: [candidate.id],
+              approvedBy: 'human',
+              memoryCandidateRefs: [candidate.id],
               source: 'memory_staging',
             });
             kept++;
@@ -1026,11 +1152,15 @@ export default async function extension(pi: any): Promise<void> {
         } else {
           rejectCandidate(ctx.cwd, taskId, candidate.id);
           emitPolicyDecision(ctx.cwd, sid, {
-            taskId, subjectType: 'memory_write', subjectName: candidate.id,
+            taskId,
+            subjectType: 'memory_write',
+            subjectName: candidate.id,
             actionRequested: 'write to brain (orphan recovery)',
-            decision: 'rejected', reasonCode: 'human_rejected_recovery',
+            decision: 'rejected',
+            reasonCode: 'human_rejected_recovery',
             reason: 'user rejected orphaned memory candidate',
-            approvedBy: 'none', memoryCandidateRefs: [candidate.id],
+            approvedBy: 'none',
+            memoryCandidateRefs: [candidate.id],
             source: 'memory_staging',
           });
           dropped++;
@@ -1064,10 +1194,23 @@ export default async function extension(pi: any): Promise<void> {
         case 'SHARED_UNDERSTANDING': {
           ctx.ui.notify(`${taskId} is in SHARED_UNDERSTANDING — running /plan`, 'info');
           try {
-            const { outcome } = await runPlan({ repoRoot: ctx.cwd, sessionId: sid, taskId, ui, drafter: buildPlanDrafter() });
+            const { outcome } = await runPlan({
+              repoRoot: ctx.cwd,
+              sessionId: sid,
+              taskId,
+              ui,
+              drafter: buildPlanDrafter(),
+            });
             refreshStatusBar(ctx.cwd, taskId, ctx);
-            ctx.ui.notify(outcome === 'approved' ? 'Plan approved. Run /continue to proceed.' : 'Plan rejected. Refine and /continue.', outcome === 'approved' ? 'info' : 'error');
-          } catch (e) { ctx.ui.notify(`/continue (plan) failed: ${(e as Error).message}`, 'error'); }
+            ctx.ui.notify(
+              outcome === 'approved'
+                ? 'Plan approved. Run /continue to proceed.'
+                : 'Plan rejected. Refine and /continue.',
+              outcome === 'approved' ? 'info' : 'error',
+            );
+          } catch (e) {
+            ctx.ui.notify(`/continue (plan) failed: ${(e as Error).message}`, 'error');
+          }
           break;
         }
         case 'AWAITING_PLAN_APPROVAL':
@@ -1075,9 +1218,12 @@ export default async function extension(pi: any): Promise<void> {
           ctx.ui.notify(`${taskId} is in ${state} — running /run`, 'info');
           try {
             const ckpt = await createCheckpoint(ctx.cwd, `agent-os-checkpoint: ${taskId}`);
-            if (ckpt.created) ctx.ui.notify(`Checkpoint: stashed ${ckpt.dirtyFiles.length} file(s).`, 'info');
+            if (ckpt.created)
+              ctx.ui.notify(`Checkpoint: stashed ${ckpt.dirtyFiles.length} file(s).`, 'info');
             const { outcome } = await runRun({
-              repoRoot: ctx.cwd, sessionId: sid, taskId,
+              repoRoot: ctx.cwd,
+              sessionId: sid,
+              taskId,
               executor: makeShellStepExecutor({ cwd: ctx.cwd }),
               resume: state === 'FAILED_RECOVERABLE',
             });
@@ -1086,27 +1232,36 @@ export default async function extension(pi: any): Promise<void> {
               const r = await restoreCheckpoint(ctx.cwd);
               if (r.restored) ctx.ui.notify('Checkpoint restored.', 'info');
             }
-            ctx.ui.notify(outcome === 'verifying' ? 'Run complete. /continue to verify.' : `Run ${outcome}. Fix and /continue.`, outcome === 'verifying' ? 'info' : 'error');
-          } catch (e) { ctx.ui.notify(`/continue (run) failed: ${(e as Error).message}`, 'error'); }
+            ctx.ui.notify(
+              outcome === 'verifying'
+                ? 'Run complete. /continue to verify.'
+                : `Run ${outcome}. Fix and /continue.`,
+              outcome === 'verifying' ? 'info' : 'error',
+            );
+          } catch (e) {
+            ctx.ui.notify(`/continue (run) failed: ${(e as Error).message}`, 'error');
+          }
           break;
         }
         case 'VERIFYING': {
           ctx.ui.notify(`${taskId} is in VERIFYING — running /verify`, 'info');
           try {
             const { result } = await runVerify({
-              repoRoot: ctx.cwd, sessionId: sid, taskId,
-              runner: {
-                async runCommand(cmd: string) {
-                  try {
-                    const { stdout, stderr } = await execFileAsync('sh', ['-c', cmd], { cwd: ctx.cwd, timeout: 60_000 });
-                    return { exitCode: 0, stdout, stderr };
-                  } catch (err: any) { return { exitCode: err.code ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? String(err.message) }; }
-                },
-              },
+              repoRoot: ctx.cwd,
+              sessionId: sid,
+              taskId,
+              runner: makeShellCommandRunner({ cwd: ctx.cwd }),
             });
             refreshStatusBar(ctx.cwd, taskId, ctx);
-            ctx.ui.notify(result === 'pass' ? 'Verified. /continue to review.' : `Verify ${result}. Fix and /continue.`, result === 'pass' ? 'info' : 'error');
-          } catch (e) { ctx.ui.notify(`/continue (verify) failed: ${(e as Error).message}`, 'error'); }
+            ctx.ui.notify(
+              result === 'pass'
+                ? 'Verified. /continue to review.'
+                : `Verify ${result}. Fix and /continue.`,
+              result === 'pass' ? 'info' : 'error',
+            );
+          } catch (e) {
+            ctx.ui.notify(`/continue (verify) failed: ${(e as Error).message}`, 'error');
+          }
           break;
         }
         case 'AWAITING_HUMAN_REVIEW': {
@@ -1114,18 +1269,35 @@ export default async function extension(pi: any): Promise<void> {
           try {
             const { status } = await runReview({ repoRoot: ctx.cwd, sessionId: sid, taskId, ui });
             refreshStatusBar(ctx.cwd, taskId, ctx);
-            ctx.ui.notify(status === 'PASS' || status === 'PASS_WITH_DEGRADATION' ? `Review ${status}. /continue to evaluate.` : `Review ${status}. Fix and /continue.`, status === 'FAIL' || status === 'BLOCKED' ? 'error' : 'info');
-          } catch (e) { ctx.ui.notify(`/continue (review) failed: ${(e as Error).message}`, 'error'); }
+            ctx.ui.notify(
+              status === 'PASS' || status === 'PASS_WITH_DEGRADATION'
+                ? `Review ${status}. /continue to evaluate.`
+                : `Review ${status}. Fix and /continue.`,
+              status === 'FAIL' || status === 'BLOCKED' ? 'error' : 'info',
+            );
+          } catch (e) {
+            ctx.ui.notify(`/continue (review) failed: ${(e as Error).message}`, 'error');
+          }
           break;
         }
         case 'EVALUATING': {
           ctx.ui.notify(`${taskId} is in EVALUATING — running /evaluate`, 'info');
           try {
-            const { taskOutcome, criteriaSatisfactionRate } = await runEvaluate({ repoRoot: ctx.cwd, sessionId: sid, taskId, ui });
+            const { taskOutcome, criteriaSatisfactionRate } = await runEvaluate({
+              repoRoot: ctx.cwd,
+              sessionId: sid,
+              taskId,
+              ui,
+            });
             refreshStatusBar(ctx.cwd, taskId, ctx);
             const pct = Math.round(criteriaSatisfactionRate * 100);
-            ctx.ui.notify(`Evaluation: ${taskOutcome} (${pct}%). Run /remember to save learnings.`, taskOutcome === 'FAIL' ? 'error' : 'info');
-          } catch (e) { ctx.ui.notify(`/continue (evaluate) failed: ${(e as Error).message}`, 'error'); }
+            ctx.ui.notify(
+              `Evaluation: ${taskOutcome} (${pct}%). Run /remember to save learnings.`,
+              taskOutcome === 'FAIL' ? 'error' : 'info',
+            );
+          } catch (e) {
+            ctx.ui.notify(`/continue (evaluate) failed: ${(e as Error).message}`, 'error');
+          }
           break;
         }
         case 'PERSISTING_KNOWLEDGE': {
@@ -1138,7 +1310,10 @@ export default async function extension(pi: any): Promise<void> {
           break;
         }
         default: {
-          ctx.ui.notify(`${taskId} is in ${state} — no automatic continuation for this state. Run /status.`, 'error');
+          ctx.ui.notify(
+            `${taskId} is in ${state} — no automatic continuation for this state. Run /status.`,
+            'error',
+          );
         }
       }
     },
@@ -1179,7 +1354,9 @@ export default async function extension(pi: any): Promise<void> {
             };
           }
         }
-      } catch { /* best-effort: fall back to base tier */ }
+      } catch {
+        /* best-effort: fall back to base tier */
+      }
     }
 
     const decision = decideToolCall(
@@ -1188,8 +1365,11 @@ export default async function extension(pi: any): Promise<void> {
     );
 
     const auditSessionId = (() => {
-      try { return (escalateTaskId && loadTaskSessionId(ctx.cwd, escalateTaskId)) || randomUUID(); }
-      catch { return randomUUID(); }
+      try {
+        return (escalateTaskId && loadTaskSessionId(ctx.cwd, escalateTaskId)) || randomUUID();
+      } catch {
+        return randomUUID();
+      }
     })();
 
     if (decision.outcome === 'pass') {
@@ -1207,20 +1387,34 @@ export default async function extension(pi: any): Promise<void> {
           `Allow "${toolName}"? It is not in the built-in registry.`,
         );
         emitPolicyDecision(ctx.cwd, auditSessionId, {
-          taskId: escalateTaskId ?? undefined, phase: escalateState ?? undefined,
-          subjectType: 'tool_call', subjectName: toolName, actionRequested: 'execute',
-          decision: approved ? 'approved' : 'rejected', reasonCode: 'unknown_tool',
+          taskId: escalateTaskId ?? undefined,
+          phase: escalateState ?? undefined,
+          subjectType: 'tool_call',
+          subjectName: toolName,
+          actionRequested: 'execute',
+          decision: approved ? 'approved' : 'rejected',
+          reasonCode: 'unknown_tool',
           reason: `tool not in registry; user ${approved ? 'allowed' : 'denied'}`,
-          riskTier: null, approvedBy: approved ? 'human' : 'none', source: 'tool_call',
+          riskTier: null,
+          approvedBy: approved ? 'human' : 'none',
+          source: 'tool_call',
         });
-        return approved ? undefined : { block: true, reason: `user denied unknown tool: ${toolName}` };
+        return approved
+          ? undefined
+          : { block: true, reason: `user denied unknown tool: ${toolName}` };
       }
       emitPolicyDecision(ctx.cwd, auditSessionId, {
-        taskId: escalateTaskId ?? undefined, phase: escalateState ?? undefined,
-        subjectType: 'tool_call', subjectName: toolName, actionRequested: 'execute',
-        decision: 'block', reasonCode: `tier_${decision.tier ?? 4}_blocked`,
-        reason: decision.reason, riskTier: decision.tier,
-        approvedBy: 'none', source: 'tool_call',
+        taskId: escalateTaskId ?? undefined,
+        phase: escalateState ?? undefined,
+        subjectType: 'tool_call',
+        subjectName: toolName,
+        actionRequested: 'execute',
+        decision: 'block',
+        reasonCode: `tier_${decision.tier ?? 4}_blocked`,
+        reason: decision.reason,
+        riskTier: decision.tier,
+        approvedBy: 'none',
+        source: 'tool_call',
       });
       ctx.ui.notify(`Blocked: ${toolName} — ${decision.reason}`, 'error');
       return { block: true, reason: decision.reason };
@@ -1232,21 +1426,36 @@ export default async function extension(pi: any): Promise<void> {
     const phaseHint = state ? ` [phase: ${state}]` : '';
     if (escalated) {
       emitPolicyDecision(ctx.cwd, auditSessionId, {
-        taskId: taskId ?? undefined, phase: state ?? undefined,
-        subjectType: 'tool_call', subjectName: toolName, actionRequested: 'execute',
-        decision: 'escalate', reasonCode: 'write_outside_executing',
+        taskId: taskId ?? undefined,
+        phase: state ?? undefined,
+        subjectType: 'tool_call',
+        subjectName: toolName,
+        actionRequested: 'execute',
+        decision: 'escalate',
+        reasonCode: 'write_outside_executing',
         reason: `${toolName} escalated to tier-3 (current phase: ${state})`,
-        riskTier: 3, approvedBy: 'none', source: 'tool_call',
+        riskTier: 3,
+        approvedBy: 'none',
+        source: 'tool_call',
       });
     }
-    const approved = await ctx.ui.confirm('Agent OS', `${toolName}: ${decision.reason}${phaseHint}`);
+    const approved = await ctx.ui.confirm(
+      'Agent OS',
+      `${toolName}: ${decision.reason}${phaseHint}`,
+    );
     if (decision.cacheKey) recordTier2Approval(sessionCache, decision.cacheKey, approved);
     emitPolicyDecision(ctx.cwd, auditSessionId, {
-      taskId: taskId ?? undefined, phase: state ?? undefined,
-      subjectType: 'tool_call', subjectName: toolName, actionRequested: 'execute',
-      decision: approved ? 'approved' : 'rejected', reasonCode: approved ? 'human_approved' : 'human_rejected',
+      taskId: taskId ?? undefined,
+      phase: state ?? undefined,
+      subjectType: 'tool_call',
+      subjectName: toolName,
+      actionRequested: 'execute',
+      decision: approved ? 'approved' : 'rejected',
+      reasonCode: approved ? 'human_approved' : 'human_rejected',
       reason: `user ${approved ? 'approved' : 'denied'}: ${decision.reason}`,
-      riskTier: decision.tier, approvedBy: approved ? 'human' : 'none', source: 'tool_call',
+      riskTier: decision.tier,
+      approvedBy: approved ? 'human' : 'none',
+      source: 'tool_call',
     });
     return approved ? undefined : { block: true, reason: `user denied: ${toolName}` };
   });
@@ -1257,17 +1466,29 @@ export default async function extension(pi: any): Promise<void> {
       // State-aware welcome: guide user to the right next action.
       const initialized = existsSync(join(ctx.cwd, '.agent-os', 'project.yaml'));
       if (!initialized) {
-        ctx.ui.notify('Agent OS active. Project not initialized — run /init to set up, then /doctor.', 'info');
+        ctx.ui.notify(
+          'Agent OS active. Project not initialized — run /init to set up, then /doctor.',
+          'info',
+        );
       } else {
         try {
           const taskId = getCurrentTaskId(ctx.cwd);
           if (taskId) {
             const state = loadTaskState(ctx.cwd, taskId) ?? 'UNKNOWN';
             const pending = listPendingCandidates(ctx.cwd, taskId);
-            const memHint = pending.length > 0 ? ` | ${pending.length} memory candidate(s) — /memory ${taskId}` : '';
-            ctx.ui.notify(`Agent OS active. ${taskId} | ${state}${memHint} — /continue to resume, /status for details.`, 'info');
+            const memHint =
+              pending.length > 0
+                ? ` | ${pending.length} memory candidate(s) — /memory ${taskId}`
+                : '';
+            ctx.ui.notify(
+              `Agent OS active. ${taskId} | ${state}${memHint} — /continue to resume, /status for details.`,
+              'info',
+            );
           } else {
-            ctx.ui.notify('Agent OS active. No active task — /flow <goal> to start, /doctor to verify setup.', 'info');
+            ctx.ui.notify(
+              'Agent OS active. No active task — /flow <goal> to start, /doctor to verify setup.',
+              'info',
+            );
           }
         } catch {
           ctx.ui.notify('Agent OS active. Run /doctor to check project setup.', 'info');

@@ -1,6 +1,7 @@
 // src/ccp/commands/shared/step-executor.ts
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { type CommandRunner, makeShellCommandRunner } from './command-runner';
 
 const execFileAsync = promisify(execFile);
 
@@ -72,18 +73,20 @@ export function makeMockStepExecutor(
 export interface ShellExecutorOptions {
   cwd: string;
   timeout?: number;
+  runner?: CommandRunner;
 }
 
 async function gitChangedFiles(cwd: string): Promise<{ files: string[]; isGit: boolean }> {
   try {
     const [tracked, untracked] = await Promise.all([
       execFileAsync('git', ['diff', '--name-only', 'HEAD'], { cwd }).then((r) => r.stdout.trim()),
-      execFileAsync('git', ['ls-files', '--others', '--exclude-standard'], { cwd }).then((r) => r.stdout.trim()),
+      execFileAsync('git', ['ls-files', '--others', '--exclude-standard'], { cwd }).then((r) =>
+        r.stdout.trim(),
+      ),
     ]);
-    const files = [
-      ...tracked.split('\n'),
-      ...untracked.split('\n'),
-    ].map((f) => f.trim()).filter(Boolean);
+    const files = [...tracked.split('\n'), ...untracked.split('\n')]
+      .map((f) => f.trim())
+      .filter(Boolean);
     return { files, isGit: true };
   } catch {
     return { files: [], isGit: false };
@@ -104,7 +107,12 @@ function classifyScope(
     return { result: 'no_changes', extra: [], missing: [] };
   }
   if (declared.length === 0 && observed.length > 0) {
-    return { result: 'extra_files_detected', extra, missing: [], reason: `${extra.length} file(s) changed with no declared scope` };
+    return {
+      result: 'extra_files_detected',
+      extra,
+      missing: [],
+      reason: `${extra.length} file(s) changed with no declared scope`,
+    };
   }
   if (extra.length === 0 && missing.length === 0) {
     return { result: 'exact_match', extra: [], missing: [] };
@@ -116,11 +124,16 @@ function classifyScope(
   if (observed.length > 0) {
     return { result: 'subset_match', extra: [], missing };
   }
-  return { result: 'missing_expected_changes', extra: [], missing, reason: `expected ${missing.join(', ')} but no files changed` };
+  return {
+    result: 'missing_expected_changes',
+    extra: [],
+    missing,
+    reason: `expected ${missing.join(', ')} but no files changed`,
+  };
 }
 
 export function makeShellStepExecutor(opts: ShellExecutorOptions): StepExecutor {
-  const timeout = opts.timeout ?? 60_000;
+  const runner = opts.runner ?? makeShellCommandRunner({ cwd: opts.cwd, timeout: opts.timeout });
   return {
     async executeStep({ step }) {
       const commandsRun: string[] = [];
@@ -132,19 +145,25 @@ export function makeShellStepExecutor(opts: ShellExecutorOptions): StepExecutor 
 
       for (const { command } of step.commands) {
         commandsRun.push(command);
-        const t0 = Date.now();
-        try {
-          const { stdout, stderr } = await execFileAsync('sh', ['-c', command], { cwd: opts.cwd, timeout });
-          const duration_ms = Date.now() - t0;
-          commandOutputs.push({ command, exit_code: 0, stdout, stderr, duration_ms });
+        const out = await runner.runCommand(command);
+        if (out.exitCode === 0) {
+          commandOutputs.push({
+            command: out.command,
+            exit_code: 0,
+            stdout: out.stdout,
+            stderr: out.stderr,
+            duration_ms: out.durationMs,
+          });
           events.push(`cmd_ok: ${command.slice(0, 120)}`);
-        } catch (err: unknown) {
-          const e = err as { code?: number; stdout?: string; stderr?: string; message?: string };
-          const exitCode = e.code ?? 1;
-          const stdout = e.stdout ?? '';
-          const stderr = (e.stderr ?? String(e.message ?? '')).slice(0, 400);
-          const duration_ms = Date.now() - t0;
-          commandOutputs.push({ command, exit_code: exitCode, stdout, stderr, duration_ms });
+        } else {
+          const stderr = out.stderr.slice(0, 400);
+          commandOutputs.push({
+            command: out.command,
+            exit_code: out.exitCode,
+            stdout: out.stdout,
+            stderr,
+            duration_ms: out.durationMs,
+          });
           return {
             status: 'failed',
             files_changed: [],
@@ -153,8 +172,8 @@ export function makeShellStepExecutor(opts: ShellExecutorOptions): StepExecutor 
             approvals: [],
             events,
             failure: {
-              reason: `cmd_exit_${exitCode}`,
-              summary: stderr || `exit code ${exitCode}`,
+              reason: `cmd_exit_${out.exitCode}`,
+              summary: stderr || `exit code ${out.exitCode}`,
               recoverable: true,
             },
           };
@@ -190,7 +209,12 @@ export function makeShellStepExecutor(opts: ShellExecutorOptions): StepExecutor 
         .filter((f) => f.operation !== 'read')
         .map((f) => f.path);
 
-      const { result: scopeResult, extra, missing, reason: scopeReason } = classifyScope(declaredMutating, observedDelta);
+      const {
+        result: scopeResult,
+        extra,
+        missing,
+        reason: scopeReason,
+      } = classifyScope(declaredMutating, observedDelta);
 
       const failed = scopeResult === 'extra_files_detected';
 
@@ -227,7 +251,9 @@ export function makeShellStepExecutor(opts: ShellExecutorOptions): StepExecutor 
         scope_result: scopeResult,
         files_declared: declaredMutating,
         files_observed: observedDelta,
-        ...(missing.length > 0 ? { scope_violation_reason: `expected but not changed: ${missing.join(', ')}` } : {}),
+        ...(missing.length > 0
+          ? { scope_violation_reason: `expected but not changed: ${missing.join(', ')}` }
+          : {}),
       };
     },
   };
