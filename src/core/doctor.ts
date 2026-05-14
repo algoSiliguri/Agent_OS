@@ -233,6 +233,7 @@ export function runDoctor(repoRoot: string, opts: RunDoctorOptions = {}): Doctor
     } else {
       // Check each installed pack's version against the bundled version.
       const packDetails: string[] = [];
+      const packItems: DoctorPackItem[] = [];
       let anyStale = false;
 
       for (const packId of validPacks) {
@@ -245,6 +246,13 @@ export function runDoctor(repoRoot: string, opts: RunDoctorOptions = {}): Doctor
         if (pvd.state === 'stale' || pvd.state === 'unknown') {
           anyStale = true;
         }
+        packItems.push({
+          id: packId,
+          version: pvd.installedVersion ?? 'unknown',
+          state: pvd.state,
+          bundled_version: pvd.bundledVersion ?? undefined,
+          active: true,
+        });
       }
 
       checks.push({
@@ -252,6 +260,7 @@ export function runDoctor(repoRoot: string, opts: RunDoctorOptions = {}): Doctor
         description: 'Workflow packs installed',
         status: anyStale ? 'soft_fail' : 'pass',
         detail: packDetails.join('; '),
+        packs: packItems,
       });
     }
   }

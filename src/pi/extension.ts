@@ -172,6 +172,46 @@ function makePiUiAdapter(piUi: {
   };
 }
 
+/**
+ * Build a step executor that wraps makeShellStepExecutor and emits narrate('step', ...)
+ * notifications for step start and completion/failure.  Extracted so that /run, /flow,
+ * and /continue all share identical narration behaviour.
+ *
+ * @param cwd  The working directory passed to makeShellStepExecutor.
+ * @param ctx  The Pi command context (used for ctx.hasUI and ctx.ui.notify).
+ * @param taskId  The current task id — used to load step info from the plan artifact.
+ */
+function makeNarratingExecutor(cwd: string, ctx: any, taskId: string): { executeStep: (execArgs: { stepId: string; step: any }) => Promise<any> } {
+  let stepInfoMap: Map<string, { title: string; risk_tier: string }> = new Map();
+  try {
+    const plan = readArtifact(cwd, taskId, 'plan') as unknown as PlanArtifact;
+    for (const s of plan.steps) {
+      stepInfoMap.set(s.id, { title: s.title, risk_tier: s.risk_tier });
+    }
+  } catch {
+    /* plan may not exist yet — narration degrades gracefully */
+  }
+
+  const baseExecutor = makeShellStepExecutor({ cwd });
+  return {
+    async executeStep(execArgs: { stepId: string; step: any }) {
+      const info = stepInfoMap.get(execArgs.stepId);
+      const label = info
+        ? `${execArgs.stepId}: ${info.title} (approval tier ${info.risk_tier ?? '?'})`
+        : execArgs.stepId;
+      if (ctx.hasUI) ctx.ui.notify(narrate('step', label), 'info');
+      const result = await baseExecutor.executeStep(execArgs);
+      if (result.status === 'completed') {
+        if (ctx.hasUI) ctx.ui.notify(narrate('step', `${execArgs.stepId} completed`), 'info');
+      } else {
+        const reason = result.failure?.reason ?? 'step failed';
+        if (ctx.hasUI) ctx.ui.notify(narrate('step', `${execArgs.stepId} failed: ${reason}`), 'error');
+      }
+      return result;
+    },
+  };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export default async function extension(pi: any): Promise<void> {
   const registry = buildPiRegistry();
@@ -441,22 +481,23 @@ export default async function extension(pi: any): Promise<void> {
       const type = report.status === 'ok' ? 'info' : 'error';
       // Emit each check as its own notification so nothing is truncated.
       for (const check of report.checks) {
-        const mark = check.status === 'pass' ? '✓' : check.status === 'soft_fail' ? '~' : '✗';
-        const line = `${mark} ${check.description}${check.detail ? ` — ${check.detail}` : ''}`;
-        ctx.ui.notify(line, check.status === 'fail' ? 'error' : 'info');
         if (ctx.hasUI) {
-          ctx.ui.notify(
-            narrate('doctor', `${check.label ?? check.id ?? check.description}: ${check.status}`),
-            check.status === 'fail' ? 'error' : 'info',
-          );
+          const checkLine = narrate('doctor', `${check.label ?? check.id ?? check.description}: ${check.status}${check.detail ? ` — ${check.detail}` : ''}`);
+          const checkLevel = check.status === 'fail' ? 'error' : 'info';
+          ctx.ui.notify(checkLine, checkLevel);
+        } else {
+          const mark = check.status === 'pass' ? '✓' : check.status === 'soft_fail' ? '~' : '✗';
+          const line = `${mark} ${check.description}${check.detail ? ` — ${check.detail}` : ''}`;
+          ctx.ui.notify(line, check.status === 'fail' ? 'error' : 'info');
         }
       }
-      ctx.ui.notify(`status: ${report.status}`, type);
       if (ctx.hasUI) {
         ctx.ui.notify(
           narrate('doctor', `overall status: ${report.status}`),
           report.status === 'ok' || report.status === 'soft_fail' ? 'info' : 'error',
         );
+      } else {
+        ctx.ui.notify(`status: ${report.status}`, type);
       }
     },
   });
@@ -714,41 +755,11 @@ export default async function extension(pi: any): Promise<void> {
           });
         }
 
-        // Build a step-info map so the executor wrapper can narrate step titles.
-        let stepInfoMap: Map<string, { title: string; risk_tier: string }> = new Map();
-        try {
-          const plan = readArtifact(ctx.cwd, taskId, 'plan') as unknown as PlanArtifact;
-          for (const s of plan.steps) {
-            stepInfoMap.set(s.id, { title: s.title, risk_tier: s.risk_tier });
-          }
-        } catch {
-          /* plan may not exist yet — narration degrades gracefully */
-        }
-
-        const baseExecutor = makeShellStepExecutor({ cwd: ctx.cwd });
-        const narratingExecutor = {
-          async executeStep(execArgs: { stepId: string; step: any }) {
-            const info = stepInfoMap.get(execArgs.stepId);
-            const label = info
-              ? `${execArgs.stepId}: ${info.title} (approval tier ${info.risk_tier ?? '?'})`
-              : execArgs.stepId;
-            if (ctx.hasUI) ctx.ui.notify(narrate('step', label), 'info');
-            const result = await baseExecutor.executeStep(execArgs);
-            if (result.status === 'completed') {
-              if (ctx.hasUI) ctx.ui.notify(narrate('step', `${execArgs.stepId} completed`), 'info');
-            } else {
-              const reason = result.failure?.reason ?? 'step failed';
-              if (ctx.hasUI) ctx.ui.notify(narrate('step', `${execArgs.stepId} failed: ${reason}`), 'error');
-            }
-            return result;
-          },
-        };
-
         const { outcome } = await runRun({
           repoRoot: ctx.cwd,
           sessionId: runSid,
           taskId,
-          executor: narratingExecutor,
+          executor: makeNarratingExecutor(ctx.cwd, ctx, taskId),
         });
         if (ctx.hasUI) {
           const runToState =
@@ -1194,7 +1205,7 @@ export default async function extension(pi: any): Promise<void> {
           repoRoot: ctx.cwd,
           sessionId: loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID(),
           taskId,
-          executor: makeShellStepExecutor({ cwd: ctx.cwd }),
+          executor: makeNarratingExecutor(ctx.cwd, ctx, taskId),
         }));
         if (ctx.hasUI) {
           const flowRunToState =
@@ -1455,7 +1466,7 @@ export default async function extension(pi: any): Promise<void> {
               repoRoot: ctx.cwd,
               sessionId: sid,
               taskId,
-              executor: makeShellStepExecutor({ cwd: ctx.cwd }),
+              executor: makeNarratingExecutor(ctx.cwd, ctx, taskId),
               resume: state === 'FAILED_RECOVERABLE',
             });
             refreshStatusBar(ctx.cwd, taskId, ctx);
