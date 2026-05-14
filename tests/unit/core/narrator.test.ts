@@ -8,6 +8,8 @@ describe('narrator.narrate', () => {
 
   it('trims trailing whitespace and newlines', () => {
     expect(narrate('phase', 'GRILLING  \n')).toBe('[phase] GRILLING');
+    expect(narrate('phase', 'GRILLING\n')).toBe('[phase] GRILLING');
+    expect(narrate('phase', 'GRILLING   ')).toBe('[phase] GRILLING');
   });
 
   it('collapses internal newlines to spaces — narration is single-line', () => {
