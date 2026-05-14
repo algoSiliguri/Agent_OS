@@ -567,6 +567,7 @@ export default async function extension(pi: any): Promise<void> {
           generator,
           sourceDocs,
         });
+        if (ctx.hasUI) ctx.ui.notify(narrate('phase', 'entered SHARED_UNDERSTANDING'), 'info');
         refreshStatusBar(ctx.cwd, taskId, ctx);
         ctx.ui.notify(`Task ${taskId} created. Run /plan to draft the plan.`, 'info');
       } catch (e) {
@@ -596,6 +597,12 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
           drafter: buildPlanDrafter(),
         });
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', outcome === 'approved' ? 'entered AWAITING_PLAN_APPROVAL' : 'AWAITING_PLAN_APPROVAL → SHARED_UNDERSTANDING'),
+            'info',
+          );
+        }
         refreshStatusBar(ctx.cwd, taskId, ctx);
         if (outcome === 'approved') {
           ctx.ui.notify(
@@ -665,6 +672,15 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           executor: makeShellStepExecutor({ cwd: ctx.cwd }),
         });
+        if (ctx.hasUI) {
+          const runToState =
+            outcome === 'verifying'
+              ? 'VERIFYING'
+              : outcome === 'failed_recoverable'
+                ? 'FAILED_RECOVERABLE'
+                : 'FAILED_BLOCKED';
+          ctx.ui.notify(narrate('phase', `entered ${runToState}`), 'info');
+        }
         refreshStatusBar(ctx.cwd, taskId, ctx);
         if (outcome !== 'verifying' && ckpt.created) {
           // Restore stash on failure so changes aren't lost
@@ -723,6 +739,12 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           runner: makeShellCommandRunner({ cwd: ctx.cwd }),
         });
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', result === 'pass' ? 'entered AWAITING_HUMAN_REVIEW' : 'VERIFYING → FAILED_RECOVERABLE'),
+            'info',
+          );
+        }
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(
           result === 'pass'
@@ -760,6 +782,12 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
           phasedConfig: _diagnoseConfig,
         });
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', decision === 'proceed' ? 'DIAGNOSING → SHARED_UNDERSTANDING' : 'DIAGNOSING → FAILED_BLOCKED'),
+            'info',
+          );
+        }
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(
           decision === 'proceed'
@@ -795,6 +823,15 @@ export default async function extension(pi: any): Promise<void> {
           taskSummary,
           ui: makePiUiAdapter(ctx.ui),
         });
+        if (ctx.hasUI) {
+          const qtToState =
+            status === 'ESCALATED_TO_FULL_WORKFLOW'
+              ? 'ABORTED'
+              : status === 'PASS_QUICK'
+                ? 'AWAITING_HUMAN_REVIEW'
+                : 'FAILED_RECOVERABLE';
+          ctx.ui.notify(narrate('phase', `entered ${qtToState}`), 'info');
+        }
         ctx.ui.setStatus('agent-os', undefined);
         const msg =
           status === 'ESCALATED_TO_FULL_WORKFLOW'
@@ -829,6 +866,12 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           ui: makePiUiAdapter(ctx.ui),
         });
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', status === 'PASS' || status === 'PASS_WITH_DEGRADATION' ? 'AWAITING_HUMAN_REVIEW → EVALUATING' : 'AWAITING_HUMAN_REVIEW → VERIFYING'),
+            'info',
+          );
+        }
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(
           status === 'PASS' || status === 'PASS_WITH_DEGRADATION'
@@ -863,6 +906,12 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           ui: makePiUiAdapter(ctx.ui),
         });
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', taskOutcome !== 'FAIL' ? 'EVALUATING → PERSISTING_KNOWLEDGE' : 'EVALUATING → FAILED_RECOVERABLE'),
+            'info',
+          );
+        }
         ctx.ui.setStatus('agent-os', undefined);
         const pct = Math.round(criteriaSatisfactionRate * 100);
         ctx.ui.notify(
@@ -903,6 +952,7 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
           projectName: (config as any).project_id ?? basename(ctx.cwd),
         });
+        if (ctx.hasUI) ctx.ui.notify(narrate('phase', 'PERSISTING_KNOWLEDGE → COMPLETED'), 'info');
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(`Done — kept ${kept}, dropped ${dropped}. Task complete.`, 'info');
       } catch (e) {
@@ -941,6 +991,7 @@ export default async function extension(pi: any): Promise<void> {
           generator: grillGen,
           sourceDocs: grillDocs,
         }));
+        if (ctx.hasUI) ctx.ui.notify(narrate('phase', 'entered SHARED_UNDERSTANDING'), 'info');
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(`/flow stopped at grill: ${(e as Error).message}`, 'error');
@@ -965,6 +1016,12 @@ export default async function extension(pi: any): Promise<void> {
           ui,
           drafter: buildPlanDrafter(),
         }));
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', planOutcome === 'approved' ? 'entered AWAITING_PLAN_APPROVAL' : 'AWAITING_PLAN_APPROVAL → SHARED_UNDERSTANDING'),
+            'info',
+          );
+        }
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(`/flow stopped at plan: ${(e as Error).message}`, 'error');
@@ -1001,6 +1058,15 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           executor: makeShellStepExecutor({ cwd: ctx.cwd }),
         }));
+        if (ctx.hasUI) {
+          const flowRunToState =
+            runOutcome === 'verifying'
+              ? 'VERIFYING'
+              : runOutcome === 'failed_recoverable'
+                ? 'FAILED_RECOVERABLE'
+                : 'FAILED_BLOCKED';
+          ctx.ui.notify(narrate('phase', `entered ${flowRunToState}`), 'info');
+        }
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
         if (flowCkpt.created) {
@@ -1037,6 +1103,12 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           runner: makeShellCommandRunner({ cwd: ctx.cwd }),
         }));
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', verifyResult === 'pass' ? 'entered AWAITING_HUMAN_REVIEW' : 'VERIFYING → FAILED_RECOVERABLE'),
+            'info',
+          );
+        }
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(`/flow stopped at verify: ${(e as Error).message}`, 'error');
@@ -1061,6 +1133,12 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           ui,
         }));
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', reviewStatus === 'PASS' || reviewStatus === 'PASS_WITH_DEGRADATION' ? 'AWAITING_HUMAN_REVIEW → EVALUATING' : 'AWAITING_HUMAN_REVIEW → VERIFYING'),
+            'info',
+          );
+        }
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(`/flow stopped at review: ${(e as Error).message}`, 'error');
@@ -1085,6 +1163,12 @@ export default async function extension(pi: any): Promise<void> {
           taskId,
           ui,
         }));
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('phase', taskOutcome !== 'FAIL' ? 'EVALUATING → PERSISTING_KNOWLEDGE' : 'EVALUATING → FAILED_RECOVERABLE'),
+            'info',
+          );
+        }
       } catch (e) {
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(`/flow stopped at evaluate: ${(e as Error).message}`, 'error');
