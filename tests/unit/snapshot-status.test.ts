@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionDashboard } from '../../src/core/projector';
 import { renderStatusToString } from '../../src/core/renderer';
+import { renderDoctorReport } from '../../src/ccp/commands/doctor';
 
 function baseDashboard(overrides: Partial<SessionDashboard> = {}): SessionDashboard {
   return {
@@ -69,6 +70,59 @@ describe('renderStatusToString — medium-density layout', () => {
       // No Pack/Phase/Validators/Memory rows when fields are absent
       expect(out).not.toMatch(/Pack:/);
       expect(out).not.toMatch(/Validators:/);
+    } finally {
+      delete process.env.NO_COLOR;
+    }
+  });
+});
+
+describe('renderDoctorReport — medium-density', () => {
+  it('fresh-install shows all checks pass', () => {
+    process.env.NO_COLOR = '1';
+    try {
+      const report = {
+        status: 'ok' as const,
+        checks: [
+          { id: 'constitution', description: 'Constitution', label: 'Constitution', status: 'pass' as const, detail: 'present' },
+          { id: 'project', description: 'Project config', label: 'Project config', status: 'pass' as const, detail: 'valid (project.yaml)' },
+          {
+            id: 'packs', description: 'Packs', label: 'Packs', status: 'pass' as const,
+            packs: [
+              { id: 'engineering-core', version: '1.0.0', state: 'current' as const, active: true },
+            ],
+          },
+          { id: 'verify', description: 'Verification', label: 'Verification', status: 'pass' as const, detail: 'pytest detected (pyproject.toml)' },
+        ],
+      };
+      const out = renderDoctorReport(report);
+      expect(out).toMatch(/Agent OS doctor/);
+      expect(out).toMatch(/engineering-core@1\.0\.0/);
+      expect(out).toMatch(/Status: ok/);
+    } finally {
+      delete process.env.NO_COLOR;
+    }
+  });
+
+  it('stale pack shows recovery hint', () => {
+    process.env.NO_COLOR = '1';
+    try {
+      const report = {
+        status: 'soft_fail' as const,
+        checks: [
+          {
+            id: 'packs', description: 'Packs', label: 'Packs', status: 'soft_fail' as const,
+            packs: [
+              { id: 'engineering-core', version: '1.0.0', state: 'stale' as const, bundled_version: '1.1.0', active: true },
+            ],
+          },
+        ],
+        hint: 'run /init --upgrade --force',
+      };
+      const out = renderDoctorReport(report);
+      expect(out).toMatch(/stale/);
+      expect(out).toMatch(/1\.1\.0/);
+      expect(out).toMatch(/Status: soft_fail/);
+      expect(out).toMatch(/Hint:.*init --upgrade --force/);
     } finally {
       delete process.env.NO_COLOR;
     }

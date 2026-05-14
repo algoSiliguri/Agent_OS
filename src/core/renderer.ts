@@ -245,8 +245,12 @@ export function renderTraceToString(
   const lines: string[] = [
     bar,
     `  Session ${c('dim', sessionId.slice(0, 8))}  ${healthLine(status, dashboard)}`,
-    bar,
   ];
+  if (dashboard.active_pack) {
+    const p = dashboard.active_pack;
+    lines.push(`  Pack:        ${renderPackBadge(p.state, p.id, p.version, p.bundled_version)}`);
+  }
+  lines.push(bar);
 
   if (shown.length === 0) {
     lines.push(c('dim', '  No events yet.'));
