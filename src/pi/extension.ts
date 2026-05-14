@@ -21,6 +21,8 @@ import { runQuickTask } from '../ccp/commands/quick-task';
 import { runRemember } from '../ccp/commands/remember';
 import { runReview } from '../ccp/commands/review';
 import { runRun } from '../ccp/commands/run';
+import { readArtifact } from '../ccp/artifacts/io';
+import type { PlanArtifact } from '../ccp/artifacts/plan-artifact';
 import { makeShellCommandRunner } from '../ccp/commands/shared/command-runner';
 import { getCurrentTaskId } from '../ccp/commands/shared/current-task';
 import { createCheckpoint, restoreCheckpoint } from '../ccp/commands/shared/git-checkpoint';
@@ -674,11 +676,41 @@ export default async function extension(pi: any): Promise<void> {
           });
         }
 
+        // Build a step-info map so the executor wrapper can narrate step titles.
+        let stepInfoMap: Map<string, { title: string; risk_tier: string }> = new Map();
+        try {
+          const plan = readArtifact(ctx.cwd, taskId, 'plan') as unknown as PlanArtifact;
+          for (const s of plan.steps) {
+            stepInfoMap.set(s.id, { title: s.title, risk_tier: s.risk_tier });
+          }
+        } catch {
+          /* plan may not exist yet — narration degrades gracefully */
+        }
+
+        const baseExecutor = makeShellStepExecutor({ cwd: ctx.cwd });
+        const narratingExecutor = {
+          async executeStep(execArgs: { stepId: string; step: any }) {
+            const info = stepInfoMap.get(execArgs.stepId);
+            const label = info
+              ? `${execArgs.stepId}: ${info.title} (approval tier ${info.risk_tier ?? '?'})`
+              : execArgs.stepId;
+            if (ctx.hasUI) ctx.ui.notify(narrate('step', label), 'info');
+            const result = await baseExecutor.executeStep(execArgs);
+            if (result.status === 'completed') {
+              if (ctx.hasUI) ctx.ui.notify(narrate('step', `${execArgs.stepId} completed`), 'info');
+            } else {
+              const reason = result.failure?.reason ?? 'step failed';
+              if (ctx.hasUI) ctx.ui.notify(narrate('step', `${execArgs.stepId} failed: ${reason}`), 'error');
+            }
+            return result;
+          },
+        };
+
         const { outcome } = await runRun({
           repoRoot: ctx.cwd,
           sessionId: runSid,
           taskId,
-          executor: makeShellStepExecutor({ cwd: ctx.cwd }),
+          executor: narratingExecutor,
         });
         if (ctx.hasUI) {
           const runToState =
@@ -952,6 +984,15 @@ export default async function extension(pi: any): Promise<void> {
       });
       ctx.ui.setStatus('agent-os', 'remembering…');
       try {
+        // Narrate any already-staged candidates from a prior interrupted run.
+        const pendingBefore = listPendingCandidates(ctx.cwd, taskId);
+        if (pendingBefore.length > 0 && ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('memory', `${pendingBefore.length} candidate${pendingBefore.length === 1 ? '' : 's'} pending approval`),
+            'info',
+          );
+        }
+
         const { kept, dropped } = await runRemember({
           repoRoot: ctx.cwd,
           sessionId: loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID(),
@@ -960,6 +1001,15 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
           projectName: (config as any).project_id ?? basename(ctx.cwd),
         });
+
+        // Narrate the overall memory outcome.
+        const total = kept + dropped;
+        if (ctx.hasUI && total > 0) {
+          ctx.ui.notify(
+            narrate('memory', `${kept} candidate${kept === 1 ? '' : 's'} approved, ${dropped} declined`),
+            'info',
+          );
+        }
         if (ctx.hasUI) ctx.ui.notify(narrate('phase', 'PERSISTING_KNOWLEDGE → COMPLETED'), 'info');
         ctx.ui.setStatus('agent-os', undefined);
         ctx.ui.notify(`Done — kept ${kept}, dropped ${dropped}. Task complete.`, 'info');
