@@ -955,6 +955,7 @@ export default async function extension(pi: any): Promise<void> {
         return;
       }
       ctx.ui.setStatus('agent-os', 'reviewing…');
+      if (ctx.hasUI) ctx.ui.notify(narrate('review', 'awaiting human review'), 'info');
       try {
         const verifySessionId = loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID();
         const { status } = await runReview({
@@ -964,6 +965,10 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
         });
         if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('review', `task ${status}`),
+            status === 'FAIL' || status === 'BLOCKED' ? 'error' : 'info',
+          );
           ctx.ui.notify(
             narrate('phase', status === 'PASS' || status === 'PASS_WITH_DEGRADATION' ? 'AWAITING_HUMAN_REVIEW → EVALUATING' : 'AWAITING_HUMAN_REVIEW → VERIFYING'),
             'info',
@@ -995,6 +1000,7 @@ export default async function extension(pi: any): Promise<void> {
         return;
       }
       ctx.ui.setStatus('agent-os', 'evaluating…');
+      if (ctx.hasUI) ctx.ui.notify(narrate('evaluate', 'evaluating task outcome'), 'info');
       try {
         const evalSessionId = loadTaskSessionId(ctx.cwd, taskId) ?? randomUUID();
         const { taskOutcome, criteriaSatisfactionRate } = await runEvaluate({
@@ -1004,6 +1010,10 @@ export default async function extension(pi: any): Promise<void> {
           ui: makePiUiAdapter(ctx.ui),
         });
         if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('evaluate', `outcome: ${taskOutcome} (criteria=${criteriaSatisfactionRate})`),
+            taskOutcome === 'FAIL' ? 'error' : 'info',
+          );
           ctx.ui.notify(
             narrate('phase', taskOutcome !== 'FAIL' ? 'EVALUATING → PERSISTING_KNOWLEDGE' : 'EVALUATING → FAILED_RECOVERABLE'),
             'info',
