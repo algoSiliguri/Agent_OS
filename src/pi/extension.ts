@@ -525,6 +525,14 @@ export default async function extension(pi: any): Promise<void> {
           );
         }
       }
+      if (docs.length > 0 && ctx.hasUI) {
+        const shown = docs.slice(0, 5).map((d) => d.path);
+        const extra = docs.length > 5 ? ` … +${docs.length - 5} more` : '';
+        ctx.ui.notify(
+          narrate('doc', `using ${shown.join(', ')}${extra} as grounding source${docs.length === 1 ? '' : 's'}`),
+          'info',
+        );
+      }
       const maxQ = _grillConfig.max_questions ?? 8;
       return { generator: new PackQuestionGenerator(docs, maxQ), sourceDocs: docs };
     }
