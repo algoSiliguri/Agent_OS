@@ -45,6 +45,7 @@ import {
 import { ToolRegistry } from '../ccp/policy/tool-registry';
 import { type ArtifactType, taskArtifactPath, taskDir } from '../ccp/task-paths';
 import { type DetectedDoc, detectDocs } from '../core/doc-detector';
+import { narrate } from '../core/narrator';
 import {
   buildHeartbeatEvent,
   buildValidatorFailedEvent,
@@ -213,11 +214,15 @@ export default async function extension(pi: any): Promise<void> {
             _grillConfig = result.manifest.grill;
             _planConfig = result.manifest.plan;
             if (ctx.hasUI) {
+              ctx.ui.notify(narrate('pack', `${result.manifest.workflow_pack_id} v${result.manifest.version} loaded`), 'info');
               ctx.ui.setStatus(
                 'agent-os',
                 `Pack: ${result.manifest.workflow_pack_id} v${result.manifest.version}`,
               );
               setTimeout(() => ctx.ui.setStatus('agent-os', undefined), 5000);
+              for (const w of result.manifest.prompt_warnings) {
+                ctx.ui.notify(narrate('pack', w), 'info');
+              }
             }
             try {
               emitAndProject(
@@ -238,14 +243,14 @@ export default async function extension(pi: any): Promise<void> {
             // Additional valid packs are ignored in v1.x.
             if (ctx.hasUI) {
               ctx.ui.notify(
-                `Workflow pack ignored (v1.x supports one active pack): ${result.manifest.workflow_pack_id}. Active: ${activePackId}.`,
+                narrate('pack', `${result.manifest.workflow_pack_id} ignored — v1.x supports one active pack`),
                 'info',
               );
             }
           }
         } else {
           if (ctx.hasUI) {
-            ctx.ui.notify(`Workflow pack load failed: ${result.error}`, 'error');
+            ctx.ui.notify(narrate('pack', `load failed — ${result.error}`), 'error');
           }
           try {
             emitAndProject(
@@ -329,7 +334,7 @@ export default async function extension(pi: any): Promise<void> {
           /* best-effort */
         }
         if (ctx.hasUI) {
-          ctx.ui.notify(`[${id}] passed`, 'info');
+          ctx.ui.notify(narrate('validator', `${id} passed`), 'info');
         }
       } else {
         try {
@@ -351,7 +356,7 @@ export default async function extension(pi: any): Promise<void> {
         const summary = result.findings.map((f) => f.message).join('; ');
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `[${id}] ${mode === 'advisory' ? 'advisory' : 'FAILED'}: ${summary}`,
+            narrate('validator', `${id} ${mode === 'advisory' ? 'advisory' : 'FAILED'}: ${summary}`),
             mode === 'advisory' ? 'info' : 'error',
           );
         }
