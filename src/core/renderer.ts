@@ -78,6 +78,23 @@ export function renderPackBadge(
   return `${idPart} ${glyph} ${suffix}`;
 }
 
+// ── Progress bar ──────────────────────────────────────────────────────────────
+
+export function renderProgressBar(
+  current: number,
+  total: number,
+  width: number = 8,
+): string {
+  const t = Math.max(1, total);
+  const c0 = Math.max(0, Math.min(current, t));
+  const cells = Math.max(1, width);
+  const filled = Math.round((c0 / t) * cells);
+  const empty = cells - filled;
+  const filledChar = USE_ANSI ? '█' : '#';
+  const emptyChar = USE_ANSI ? '░' : '-';
+  return `${c0}/${t}  [${filledChar.repeat(filled)}${emptyChar.repeat(empty)}]`;
+}
+
 // ── Timeline filter ───────────────────────────────────────────────────────────
 
 const SHOW = new Set([
