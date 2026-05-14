@@ -436,6 +436,7 @@ export default async function extension(pi: any): Promise<void> {
     description: 'Check Agent OS health for this project',
     handler: async (_args: string, ctx: any) => {
       ensurePacksLoaded(ctx.cwd, ctx);
+      if (ctx.hasUI) ctx.ui.notify(narrate('doctor', 'running checks'), 'info');
       const report = await runDoctorCommand({ repoRoot: ctx.cwd });
       const type = report.status === 'ok' ? 'info' : 'error';
       // Emit each check as its own notification so nothing is truncated.
@@ -443,8 +444,20 @@ export default async function extension(pi: any): Promise<void> {
         const mark = check.status === 'pass' ? '✓' : check.status === 'soft_fail' ? '~' : '✗';
         const line = `${mark} ${check.description}${check.detail ? ` — ${check.detail}` : ''}`;
         ctx.ui.notify(line, check.status === 'fail' ? 'error' : 'info');
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            narrate('doctor', `${check.label ?? check.id ?? check.description}: ${check.status}`),
+            check.status === 'fail' ? 'error' : 'info',
+          );
+        }
       }
       ctx.ui.notify(`status: ${report.status}`, type);
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          narrate('doctor', `overall status: ${report.status}`),
+          report.status === 'ok' || report.status === 'soft_fail' ? 'info' : 'error',
+        );
+      }
     },
   });
 
