@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolvePackVersionDetail, runDoctor } from '../../src/core/doctor';
+import { inferSourceMode, resolvePackVersionDetail, runDoctor } from '../../src/core/doctor';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,6 +134,57 @@ describe('resolvePackVersionDetail', () => {
     // no-bundled should not be treated as stale
     expect(pvd.state).not.toBe('stale');
     expect(pvd.state).not.toBe('unknown');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// inferSourceMode — pure function, no FS required
+// ---------------------------------------------------------------------------
+
+describe('inferSourceMode', () => {
+  const packageRoot = '/home/user/.pi/agent/packages/agent-os';
+
+  it('local-dev: AGENT_OS_DEV_HOME env var set', () => {
+    const original = process.env.AGENT_OS_DEV_HOME;
+    process.env.AGENT_OS_DEV_HOME = '/home/user/Agent_OS';
+    try {
+      const result = inferSourceMode(packageRoot, []);
+      expect(result.mode).toBe('local-dev');
+    } finally {
+      if (original === undefined) delete process.env.AGENT_OS_DEV_HOME;
+      else process.env.AGENT_OS_DEV_HOME = original;
+    }
+  });
+
+  it('local-path: source is an absolute filesystem path', () => {
+    const result = inferSourceMode(packageRoot, ['/home/user/projects/Agent_OS']);
+    expect(result.mode).toBe('local-path');
+    expect(result.source).toBe('/home/user/projects/Agent_OS');
+  });
+
+  it('git: source starts with git:', () => {
+    const result = inferSourceMode(packageRoot, ['git:github.com/algoSiliguri/Agent_OS@v1.6.1']);
+    expect(result.mode).toBe('git');
+    expect(result.source).toContain('Agent_OS');
+  });
+
+  it('released-package: packageRoot inside node_modules', () => {
+    const result = inferSourceMode('/home/user/node_modules/@agnivadc/agent-os', []);
+    expect(result.mode).toBe('released-package');
+  });
+
+  it('unknown: empty sources, no env vars, not node_modules', () => {
+    const original = process.env.AGENT_OS_DEV_HOME;
+    const original2 = process.env.AGENT_OS_LOCAL_DEV;
+    delete process.env.AGENT_OS_DEV_HOME;
+    delete process.env.AGENT_OS_LOCAL_DEV;
+    try {
+      const result = inferSourceMode(packageRoot, []);
+      expect(result.mode).toBe('unknown');
+    } finally {
+      if (original !== undefined) process.env.AGENT_OS_DEV_HOME = original;
+      if (original2 !== undefined) process.env.AGENT_OS_LOCAL_DEV = original2;
+    }
   });
 });
 

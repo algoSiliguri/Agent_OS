@@ -167,8 +167,8 @@ function readConfiguredPiSources(): string[] {
   }
 }
 
-function inferSourceMode(packageRoot: string): { mode: string; source?: string } {
-  const sources = readConfiguredPiSources();
+/** Visible for testing — classifies how Agent_OS was installed given a list of Pi package sources. */
+export function inferSourceMode(packageRoot: string, sources: string[]): { mode: string; source?: string } {
   const root = resolve(packageRoot);
   const source = sources.find((candidate) => {
     if (candidate.startsWith('git:') || candidate.startsWith('npm:')) return false;
@@ -204,7 +204,7 @@ function addProvenanceChecks(checks: DoctorCheck[]): void {
   });
 
   const packageRoot = agentOsPackageRoot();
-  const source = inferSourceMode(packageRoot);
+  const source = inferSourceMode(packageRoot, readConfiguredPiSources());
   checks.push({
     id: 'agent_os_package',
     description: 'Agent_OS package',
