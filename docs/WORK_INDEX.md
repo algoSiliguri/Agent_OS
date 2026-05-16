@@ -28,9 +28,9 @@ GitHub: https://github.com/algoSiliguri/Agent_OS/issues/28
 
 ## Next Issue
 
-**STORY-005: Add Dev vs Prod Environment Guide**
-Status: Ready (file committed at 33273d4, needs manual verification)
-GitHub: https://github.com/algoSiliguri/Agent_OS/issues/32
+**EPIC-000 complete.** All 9 stories Done.
+Next work: EPIC-001 (State + Event Spine Protection — characterization tests).
+No issues created yet. Create using `.github/ISSUE_TEMPLATE/epic.md`.
 
 ---
 
