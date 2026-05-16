@@ -12,7 +12,7 @@ If that file cannot be read, does not exist, or cannot be bound as governing aut
 - Operate under no Agent OS authority
 
 [A4] Deference
-If the file is successfully bound, follow its binding conditions, invalidation conditions, and output contract exactly. This file has no further instructions.
+If the file is successfully bound, follow its binding conditions, invalidation conditions, and output contract exactly. This file has no further instructions beyond [A5].
 
 [A5] Capability Declaration
 ```yaml
@@ -22,28 +22,28 @@ l3-transport: mcp
 brain-db-path: $BRAIN_DB_PATH
 ```
 
-## Agent skills
+---
 
-Non-authoritative pointers to engineering-skill configuration. Per `[A1]` and `[B6]` of the constitution, these are L2 metadata only — they describe where docs live, they do not grant authority.
+# Claude Code Instructions for Agent_OS
 
-### Issue tracker
+**All work protocol is in `AGENTS.md`. Read that first.**
 
-GitHub Issues at `algoSiliguri/context_os`. See `docs/agents/issue-tracker.md`.
+Read order:
+1. `AGENTS.md` — canonical work protocol, safety rules, current active work
+2. `docs/WORK_INDEX.md` — current story and next action
+3. The current GitHub issue (if `gh` CLI available)
 
-### Triage labels
+If `CLAUDE.md` and `AGENTS.md` conflict, `AGENTS.md` wins.
 
-Canonical labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+One-line resume prompt: `Use AGENTS.md. Continue the next Ready issue from the GitHub Project board.`
 
-### Domain docs
-
-Single-context. See `docs/agents/domain.md`.
+---
 
 ## graphify
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+This project has a knowledge graph at `graphify-out/` with god nodes, community structure, and cross-file relationships.
 
-Rules:
-- ALWAYS read graphify-out/GRAPH_REPORT.md before reading any source files, running grep/glob searches, or answering codebase questions. The graph is your primary map of the codebase.
-- IF graphify-out/wiki/index.md EXISTS, navigate it instead of reading raw files
-- For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
+- ALWAYS read `graphify-out/GRAPH_REPORT.md` before reading any source files, running grep/glob searches, or answering codebase questions. The graph is your primary map of the codebase.
+- If `graphify-out/wiki/index.md` exists, navigate it instead of reading raw files.
+- For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
