@@ -11,26 +11,24 @@ completing each issue.
 
 ## Active Epic
 
-**EPIC-000: Solo Development Operating System**
-Goal: Every future change is tracked, tested by risk tier, verified in dev
-and prod when needed, releasable, and understandable later.
-GitHub: https://github.com/algoSiliguri/Agent_OS/issues/27
+**EPIC-001: State + Event Spine Protection**
+Goal: Lock god-node behavior with characterization tests before any refactoring begins.
+GitHub: https://github.com/algoSiliguri/Agent_OS/issues/37
 
 ---
 
 ## Current Issue
 
-**STORY-001: Create Agent_OS GitHub Project Board**
-Status: Done (board created 2026-05-16 via gh CLI, 10 issues added, all fields set)
-GitHub: https://github.com/algoSiliguri/Agent_OS/issues/28
+**STORY-010: Characterize emitAndProject dual-write behavior**
+Status: Ready — move to In Progress when starting
+GitHub: https://github.com/algoSiliguri/Agent_OS/issues/38
 
 ---
 
 ## Next Issue
 
-**EPIC-000 complete.** All 9 stories Done.
-Next work: EPIC-001 (State + Event Spine Protection — characterization tests).
-No issues created yet. Create using `.github/ISSUE_TEMPLATE/epic.md`.
+**STORY-011: Characterize all ccpBase event builders**
+GitHub: https://github.com/algoSiliguri/Agent_OS/issues/39
 
 ---
 
@@ -69,12 +67,17 @@ Performed by: Claude Sonnet 4.6
 - Baseline confirmed: typecheck clean, 580 tests pass.
 - gh CLI confirmed authenticated as `algoSiliguri`.
 
-**What is NOT done yet:**
-- GitHub Project board not created (STORY-001 — manual UI task).
-- STORY-002 through STORY-009 need manual verification step each.
-- `agent-os-starter` stable tag not published.
+**What happened this session (2026-05-16 continued):**
+- EPIC-000 fully closed (all 9 stories done, board built, CI live)
+- EPIC-001 created (#37) with 6 child stories (#38–#43)
+- All issues on project board, fields tagged, EPIC-001 In Progress
 
-**Next human action:** Create GitHub Project board (STORY-001).
+**What is NOT done yet:**
+- STORY-010 through STORY-015 not started (all in Inbox)
+- `agent-os-starter` stable tag not published
+- No characterization tests written yet
+
+**Next human action:** Pick STORY-010, move to In Progress, write the test.
 
 **Next AI action:** Read this file, read `docs/SOLO_DEV_OPERATING_MODEL.md`,
 check `gh issue list`, pick exactly one Ready issue, do only that.
@@ -115,16 +118,23 @@ Follow these steps exactly. Do not skip. Do not reorder.
 
 | Issue | Title | URL |
 |---|---|---|
-| EPIC-000 | Solo Development Operating System | https://github.com/algoSiliguri/Agent_OS/issues/27 |
-| STORY-001 | Create Agent_OS GitHub Project Board | https://github.com/algoSiliguri/Agent_OS/issues/28 |
-| STORY-002 | Add Issue and PR Templates | https://github.com/algoSiliguri/Agent_OS/issues/29 |
-| STORY-003 | Add Definition of Ready and Done | https://github.com/algoSiliguri/Agent_OS/issues/30 |
-| STORY-004 | Add CI Baseline | https://github.com/algoSiliguri/Agent_OS/issues/31 |
-| STORY-005 | Add Dev vs Prod Environment Guide | https://github.com/algoSiliguri/Agent_OS/issues/32 |
-| STORY-006 | Add Install / Update / Uninstall Contract | https://github.com/algoSiliguri/Agent_OS/issues/33 |
-| STORY-007 | Add Pi Runtime Smoke Matrix | https://github.com/algoSiliguri/Agent_OS/issues/34 |
-| STORY-008 | Add Release Candidate Checklist | https://github.com/algoSiliguri/Agent_OS/issues/35 |
-| STORY-009 | Add Clean Prod Install Smoke Script Design | https://github.com/algoSiliguri/Agent_OS/issues/36 |
+| EPIC-000 | Solo Development Operating System ✓ | https://github.com/algoSiliguri/Agent_OS/issues/27 |
+| STORY-001 | Create Agent_OS GitHub Project Board ✓ | https://github.com/algoSiliguri/Agent_OS/issues/28 |
+| STORY-002 | Add Issue and PR Templates ✓ | https://github.com/algoSiliguri/Agent_OS/issues/29 |
+| STORY-003 | Add Definition of Ready and Done ✓ | https://github.com/algoSiliguri/Agent_OS/issues/30 |
+| STORY-004 | Add CI Baseline ✓ | https://github.com/algoSiliguri/Agent_OS/issues/31 |
+| STORY-005 | Add Dev vs Prod Environment Guide ✓ | https://github.com/algoSiliguri/Agent_OS/issues/32 |
+| STORY-006 | Add Install / Update / Uninstall Contract ✓ | https://github.com/algoSiliguri/Agent_OS/issues/33 |
+| STORY-007 | Add Pi Runtime Smoke Matrix ✓ | https://github.com/algoSiliguri/Agent_OS/issues/34 |
+| STORY-008 | Add Release Candidate Checklist ✓ | https://github.com/algoSiliguri/Agent_OS/issues/35 |
+| STORY-009 | Add Clean Prod Install Smoke Script Design ✓ | https://github.com/algoSiliguri/Agent_OS/issues/36 |
+| EPIC-001 | State + Event Spine Protection | https://github.com/algoSiliguri/Agent_OS/issues/37 |
+| STORY-010 | Characterize emitAndProject dual-write | https://github.com/algoSiliguri/Agent_OS/issues/38 |
+| STORY-011 | Characterize all ccpBase event builders | https://github.com/algoSiliguri/Agent_OS/issues/39 |
+| STORY-012 | Add per-artifact-type round-trip tests | https://github.com/algoSiliguri/Agent_OS/issues/40 |
+| STORY-013 | Audit writeArtifactRaw call sites | https://github.com/algoSiliguri/Agent_OS/issues/41 |
+| STORY-014 | Add task state transition characterization test | https://github.com/algoSiliguri/Agent_OS/issues/42 |
+| STORY-015 | Audit and remove writeTaskState backdoor | https://github.com/algoSiliguri/Agent_OS/issues/43 |
 
 ## Issue Drafts (archived — issues now live in GitHub)
 
